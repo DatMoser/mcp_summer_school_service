@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   redis:
     image: redis:7-alpine
@@ -21,7 +19,7 @@ services:
       - .env
     volumes:
       - .:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: sh -c "if [ -n \"$GOOGLE_CLOUD_CREDENTIALS_PATH\" ]; then gcloud auth activate-service-account --key-file=$GOOGLE_CLOUD_CREDENTIALS_PATH; fi && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
   worker:
     build: .
@@ -33,7 +31,7 @@ services:
       - .env
     volumes:
       - .:/app
-    command: rq worker --url redis://redis:6379/0
+    command: sh -c "if [ -n \"$GOOGLE_CLOUD_CREDENTIALS_PATH\" ]; then gcloud auth activate-service-account --key-file=$GOOGLE_CLOUD_CREDENTIALS_PATH; fi && export PYTHONWARNINGS='ignore::UserWarning' && rq worker --url redis://redis:6379/0"
 
 volumes:
   redis_data:
