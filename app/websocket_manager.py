@@ -92,13 +92,19 @@ class WebSocketManager:
         
         # Create a copy of the set to avoid modification during iteration
         connections = self.active_connections[job_id].copy()
+        broken_connections = []
         
         for websocket in connections:
             try:
                 await websocket.send_text(message_text)
             except Exception as e:
-                # Remove broken connections
-                self.disconnect(websocket, job_id)
+                # Collect broken connections for cleanup
+                broken_connections.append(websocket)
+                print(f"WebSocket send failed for job {job_id}: {e}")
+        
+        # Clean up broken connections outside the iteration
+        for websocket in broken_connections:
+            self.disconnect(websocket, job_id)
     
     def notify_progress(self, job_id: str, progress: int, current_step: str, 
                        step_number: int, total_steps: int, status: str = "started"):

@@ -1,5 +1,5 @@
 # app/jobs.py
-import uuid, os, tempfile, subprocess, json, time, requests
+import uuid, os, tempfile, subprocess, json, time, requests, sys
 from google.cloud import storage
 from google import generativeai as genai
 from google.auth import default
@@ -8,9 +8,11 @@ from google.cloud import aiplatform
 from elevenlabs.client import ElevenLabs
 from rq import Queue
 import redis
+from app.credential_utils import get_credentials_or_default, create_google_cloud_credentials, create_storage_client, clear_sensitive_data
+from google.cloud.storage import Blob
 
-# Configure Google Gemini API with separate API key
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# Note: Gemini API is configured per-request to use appropriate credentials
+# Global configuration removed to prevent interference with user-provided credentials
 
 # Configure Google Cloud Storage with separate credentials
 BUCKET = os.getenv("GCS_BUCKET")
@@ -23,15 +25,168 @@ else:
     client = storage.Client()
 bucket = client.bucket(BUCKET)
 
+def make_blob_public_safe(blob: Blob) -> str:
+    """
+    Make a blob publicly accessible, handling both uniform and legacy bucket access.
+    Returns the public URL.
+    """
+    try:
+        # Try legacy ACL method first
+        blob.make_public()
+        return blob.public_url
+    except Exception as e:
+        if "uniform bucket-level access" in str(e).lower():
+            # For uniform bucket-level access, we need to ensure the bucket allows public access
+            # The blob is already publicly accessible if the bucket allows it
+            # Return the public URL format
+            return f"https://storage.googleapis.com/{blob.bucket.name}/{blob.name}"
+        else:
+            # Re-raise other exceptions
+            raise e
+
 # Redis connection and queue setup
 redis_conn = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
 q = Queue(connection=redis_conn)
 
-def make_script(prompt: str) -> str:
-    model = genai.GenerativeModel("gemini-2.5-flash")
-    return model.generate_content(prompt).text  #  [oai_citation:3‡Google AI for Developers](https://ai.google.dev/gemini-api/docs/text-generation?utm_source=chatgpt.com)
+def sanitize_script_text(text: str) -> str:
+    """
+    Sanitize script text to remove markdown formatting and ensure natural speech.
+    Removes asterisks and other formatting while preserving natural punctuation.
+    """
+    import re
+    
+    # Remove all asterisks (markdown bold/italic)
+    text = re.sub(r'\*+', '', text)
+    
+    # Remove markdown headers (# ## ###)
+    text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
+    
+    # Remove markdown code blocks and inline code
+    text = re.sub(r'```[\s\S]*?```', '', text)
+    text = re.sub(r'`([^`]*)`', r'\1', text)  # Keep content inside inline code
+    
+    # Remove markdown links [text](url)
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+    
+    # Remove markdown list markers (- * +) - do this after code blocks to preserve line structure
+    text = re.sub(r'^[ \t]*[-\*\+][ \t]+', '', text, flags=re.MULTILINE)
+    
+    # Clean up whitespace - normalize spaces and line breaks
+    text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces/tabs to single space
+    text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)  # Max 2 consecutive line breaks
+    
+    # Fix spacing around periods when followed by code blocks
+    text = re.sub(r'\.(\w)', r'. \1', text)
+    
+    # Ensure proper sentence spacing
+    text = re.sub(r'([.!?])\s*([A-Z])', r'\1 \2', text)
+    
+    return text.strip()
 
-def gen_video(video_request: dict) -> str:
+def make_script(prompt: str, api_key: str) -> str:
+    # Always use provided API key - no fallback to global configuration
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-2.5-flash")
+    
+    # Enhanced prompt for natural human monologue
+    enhanced_prompt = f"""Create a natural, conversational podcast monologue based on this request: {prompt}
+
+Requirements:
+- Write as if speaking directly to listeners in a natural, human voice
+- Use conversational language with natural pauses and flow
+- Include verbal connectors like "you know", "well", "so", "now"
+- Vary sentence length for natural rhythm
+- Avoid any markdown formatting, bullet points, or structured lists
+- Sound like spontaneous speech, not written text
+- Use only standard punctuation: periods, commas, question marks, exclamation points
+- Make it engaging and personal, as if talking to a friend
+- Include natural transitions between ideas
+- Keep it conversational and authentic
+
+Generate ONLY the spoken content - no titles, headers, or formatting. Just the natural monologue text."""
+    
+    response = model.generate_content(enhanced_prompt)
+    script = response.text
+    
+    # Sanitize the script to ensure clean, natural text
+    return sanitize_script_text(script)
+
+def analyze_writing_style(content: str, api_key: str) -> dict:
+    """
+    Analyze dialogue style for podcast generation and return structured output using Gemini API.
+    Takes a style instruction (e.g., "talk like Trump") and returns podcast generation settings.
+    """
+    genai.configure(api_key=api_key)
+    
+    # Use the latest Gemini model for structured output
+    model = genai.GenerativeModel("gemini-2.5-flash")
+    
+    # Create a comprehensive prompt for dialogue style analysis
+    prompt = f"""You are a dialogue style expert for podcast generation. Given a style instruction, provide podcast generation settings that would make the speaker sound like the requested style/person.
+
+Analyze this instruction: "{content}"
+
+Return ONLY a valid JSON object with podcast generation settings:
+
+{{
+    "tone": "emotional tone for speech (e.g., authoritative, casual, dramatic, confident, passionate)",
+    "pace": "speaking pace (e.g., fast, slow, moderate, rushed, deliberate)",
+    "vocabulary_level": "word complexity (e.g., simple, conversational, sophisticated, technical, colloquial)",
+    "target_audience": "intended listeners (e.g., supporters, general public, experts, working class)",
+    "content_structure": "speech organization (e.g., rambling, structured, repetitive, stream-of-consciousness)",
+    "energy_level": "vocal energy (e.g., high, explosive, moderate, low, dynamic)",
+    "formality": "speech formality (e.g., informal, conversational, formal, crude, folksy)",
+    "humor_style": "humor approach (e.g., sarcastic, self-deprecating, boastful, witty, none)",
+    "empathy_level": "emotional connection (e.g., low, moderate, high, performative)",
+    "confidence_level": "self-assurance (e.g., extremely confident, boastful, uncertain, assertive)",
+    "storytelling": "narrative style (e.g., anecdotal, repetitive, tangential, direct, exaggerated)",
+    "keyPhrases": ["signature phrases", "common expressions", "verbal tics"],
+    "additionalInstructions": "specific vocal patterns, mannerisms, and speech characteristics to implement"
+}}
+
+Instruction to analyze: {content}
+
+Return only valid JSON:"""
+    
+    # Generate the content with structured output
+    response = model.generate_content(prompt)
+    
+    # Parse the JSON response
+    try:
+        response_text = response.text.strip()
+        
+        # Remove any markdown code block formatting if present
+        if response_text.startswith('```json'):
+            response_text = response_text[7:]
+        if response_text.startswith('```'):
+            response_text = response_text[3:]
+        if response_text.endswith('```'):
+            response_text = response_text[:-3]
+        
+        response_text = response_text.strip()
+        
+        return json.loads(response_text)
+    except json.JSONDecodeError as e:
+        print(f"JSON parsing error: {e}")
+        print(f"Raw response: {response.text}")
+        # Fallback if JSON parsing fails
+        return {
+            "tone": "conversational",
+            "pace": "moderate", 
+            "vocabulary_level": "conversational",
+            "target_audience": "general public",
+            "content_structure": "structured",
+            "energy_level": "moderate",
+            "formality": "conversational",
+            "humor_style": "none",
+            "empathy_level": "moderate",
+            "confidence_level": "confident",
+            "storytelling": "direct",
+            "keyPhrases": ["well", "you know", "I think"],
+            "additionalInstructions": "Use natural, conversational speech patterns with clear articulation"
+        }
+
+def gen_video(video_request: dict, credentials: dict = None) -> str:
     """
     Video generation using Google's full API structure.
     Supports image inputs, video inputs, and all parameters.
@@ -54,28 +209,27 @@ def gen_video(video_request: dict) -> str:
         # Send WebSocket notification
         manager.notify_progress(job_id, 10, 'Initializing video generation', 1, total_steps)
         
-        # Get credentials and access token
-        vertex_credentials_path = os.getenv("GOOGLE_CLOUD_CREDENTIALS_PATH")
-        project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "mcp-summer-school")
+        # Get credentials (user-provided or environment defaults)
+        creds_dict = credentials if credentials else {}
+        project_id = creds_dict.get('google_cloud_project') or os.getenv("GOOGLE_CLOUD_PROJECT", "mcp-summer-school")
+        location_id = creds_dict.get('vertex_ai_region') or os.getenv("VERTEX_AI_REGION", "us-central1")
+        bucket_name = creds_dict.get('gcs_bucket') or os.getenv("GCS_BUCKET")
         
-        if vertex_credentials_path:
-            # Use service account credentials
-            from google.oauth2 import service_account
-            credentials = service_account.Credentials.from_service_account_file(
-                vertex_credentials_path,
-                scopes=['https://www.googleapis.com/auth/cloud-platform']
-            )
-        else:
-            # Fall back to default credentials
-            credentials, _ = default()
+        # Get model from video request parameters or use default
+        parameters = video_request.get("parameters", {})
+        model_id = parameters.get("model") or os.getenv("VEO_MODEL_ID", "veo-3.0-generate-preview")
         
-        credentials.refresh(Request())
-        access_token = credentials.token
+        # Create Google Cloud credentials
+        google_credentials, _ = create_google_cloud_credentials(creds_dict, creds_dict.get('google_cloud_credentials'))
+        google_credentials.refresh(Request())
+        access_token = google_credentials.token
+        
+        # Create storage client with appropriate credentials
+        storage_client = create_storage_client(creds_dict)
+        bucket = storage_client.bucket(bucket_name)
         
         # Vertex AI configuration
-        location_id = os.getenv("VERTEX_AI_REGION", "us-central1")
         api_endpoint = f"{location_id}-aiplatform.googleapis.com"
-        model_id = os.getenv("VEO_MODEL_ID", "veo-3.0-generate-preview")
         
         # Step 2: Submit video generation request
         job.meta['progress'] = 50
@@ -103,8 +257,7 @@ def gen_video(video_request: dict) -> str:
         if video_request.get("video"):
             instance["video"] = video_request["video"]
         
-        # Get parameters with defaults
-        parameters = video_request.get("parameters", {})
+        # Get parameters with defaults (already extracted above)
         request_parameters = {
             "aspectRatio": parameters.get("aspectRatio", "16:9"),
             "sampleCount": parameters.get("sampleCount", 1),
@@ -124,7 +277,7 @@ def gen_video(video_request: dict) -> str:
         
         # Always set storageUri to automatically save to our GCS bucket
         # This prevents base64 responses and saves directly to our bucket
-        storage_folder = f"gs://{BUCKET}/videos/{job_id}"
+        storage_folder = f"gs://{bucket_name}/videos/{job_id}"
         request_parameters["storageUri"] = parameters.get("storageUri", storage_folder)
         
         # Prepare request payload matching Google's exact structure
@@ -173,7 +326,7 @@ def gen_video(video_request: dict) -> str:
         try:
             # Wait a brief moment for operation to be registered, then check immediately
             time.sleep(5)
-            immediate_status = fetch_operation_status(operation_name)
+            immediate_status = fetch_operation_status(operation_name, creds_dict)
             print(f"DEBUG: Immediate status check result: {immediate_status}", file=sys.stderr)
             
             # Check if operation failed immediately
@@ -190,13 +343,13 @@ def gen_video(video_request: dict) -> str:
                 videos = response_data.get("videos", [])
                 if videos and "gcsUri" in videos[0]:
                     video_gcs_uri = videos[0]["gcsUri"]
-                    blob_path = video_gcs_uri.replace(f"gs://{BUCKET}/", "")
+                    blob_path = video_gcs_uri.replace(f"gs://{bucket_name}/", "")
                     blob = bucket.blob(blob_path)
-                    blob.make_public()
+                    video_url = make_blob_public_safe(blob)
                     
                     # Operation completed immediately, skip polling
-                    print(f"DEBUG: Video ready immediately at: {blob.public_url}", file=sys.stderr)
-                    video_url = blob.public_url
+                    video_url = make_blob_public_safe(blob)
+                    print(f"DEBUG: Video ready immediately at: {video_url}", file=sys.stderr)
                 else:
                     print(f"DEBUG: Operation done but no video found, will continue polling", file=sys.stderr)
             
@@ -222,9 +375,10 @@ def gen_video(video_request: dict) -> str:
             metadata_blob = bucket.blob(f"metadata/{operation_info['video_filename'].replace('.mp4', '.json')}")
             metadata_blob.upload_from_string(json.dumps(operation_info, indent=2), content_type="application/json")
             
-            # Mark as complete
+            # Mark as complete and clear sensitive data
             job.meta['progress'] = 100
             job.meta['current_step'] = 'Complete - Video ready!'
+            job.meta = clear_sensitive_data(job.meta)
             job.save_meta()
             
             manager.notify_completion(job_id, video_url)
@@ -235,6 +389,7 @@ def gen_video(video_request: dict) -> str:
         job.meta['current_step'] = 'Video generation in progress - check status manually'
         job.meta['operation_name'] = operation_name
         job.meta['status'] = 'running'  # Explicitly mark as running, not failed
+        job.meta = clear_sensitive_data(job.meta)
         job.save_meta()
         
         # Send WebSocket notification about ongoing operation
@@ -252,35 +407,34 @@ def gen_video(video_request: dict) -> str:
         }
     
     except Exception as e:
+        # Clear sensitive data even on error
+        job = get_current_job()
+        if job:
+            job.meta = clear_sensitive_data(job.meta)
+            job.save_meta()
         manager.notify_error(job_id, str(e))
         raise e
 
 
-def fetch_operation_status(operation_name: str) -> dict:
+def fetch_operation_status(operation_name: str, credentials: dict = None) -> dict:
     """
     Query the status of a video generation operation using Google's fetchPredictOperation endpoint.
     Returns the operation status and result if available.
     """
     try:
-        # Get credentials and access token
-        vertex_credentials_path = os.getenv("GOOGLE_CLOUD_CREDENTIALS_PATH")
-        project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "mcp-summer-school")
+        # Get credentials (user-provided or environment defaults)
+        creds_dict = credentials if credentials else {}
+        project_id = creds_dict.get('google_cloud_project') or os.getenv("GOOGLE_CLOUD_PROJECT", "mcp-summer-school")
+        location_id = creds_dict.get('vertex_ai_region') or os.getenv("VERTEX_AI_REGION", "us-central1")
+        # For fetch operation, we need to use the default model since we don't have the original request
+        model_id = os.getenv("VEO_MODEL_ID", "veo-3.0-generate-preview")
         
-        if vertex_credentials_path:
-            from google.oauth2 import service_account
-            credentials = service_account.Credentials.from_service_account_file(
-                vertex_credentials_path,
-                scopes=['https://www.googleapis.com/auth/cloud-platform']
-            )
-        else:
-            credentials, _ = default()
-        
-        credentials.refresh(Request())
+        # Create Google Cloud credentials
+        google_credentials, _ = create_google_cloud_credentials(creds_dict, creds_dict.get('google_cloud_credentials'))
+        google_credentials.refresh(Request())
         
         # Vertex AI configuration
-        location_id = os.getenv("VERTEX_AI_REGION", "us-central1")
         api_endpoint = f"{location_id}-aiplatform.googleapis.com"
-        model_id = os.getenv("VEO_MODEL_ID", "veo-3.0-generate-preview")
         
         # Prepare request payload for fetchPredictOperation
         request_data = {
@@ -291,7 +445,7 @@ def fetch_operation_status(operation_name: str) -> dict:
         url = f"https://{api_endpoint}/v1/projects/{project_id}/locations/{location_id}/publishers/google/models/{model_id}:fetchPredictOperation"
         headers = {
             "Content-Type": "application/json; charset=utf-8",
-            "Authorization": f"Bearer {credentials.token}"
+            "Authorization": f"Bearer {google_credentials.token}"
         }
         
         import sys
@@ -311,16 +465,26 @@ def fetch_operation_status(operation_name: str) -> dict:
         print(f"DEBUG FETCH: Error fetching operation status: {e}", file=sys.stderr)
         raise e
 
-def gen_audio(prompt: str) -> str:
+def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = False, thumbnail_prompt: str = None) -> dict:
     from rq import get_current_job
     from app.websocket_manager import manager
     import time
     
     job = get_current_job()
     job_id = job.get_id()
-    total_steps = 4
+    total_steps = 5 if generate_thumbnail else 4
     
     try:
+        # Get credentials (user-provided or environment defaults)
+        creds_dict = credentials if credentials else {}
+        gemini_api_key = creds_dict.get('gemini_api_key') or os.getenv("GEMINI_API_KEY")
+        elevenlabs_api_key = creds_dict.get('elevenlabs_api_key') or os.getenv("XI_KEY")
+        bucket_name = creds_dict.get('gcs_bucket') or os.getenv("GCS_BUCKET")
+        
+        # Create storage client with appropriate credentials
+        storage_client = create_storage_client(creds_dict)
+        bucket = storage_client.bucket(bucket_name)
+        
         # Step 1: Generate script
         job.meta['progress'] = 10
         job.meta['current_step'] = 'Generating script with AI'
@@ -331,7 +495,7 @@ def gen_audio(prompt: str) -> str:
         # Send WebSocket notification
         manager.notify_progress(job_id, 10, 'Generating script with AI', 1, total_steps)
         
-        script = make_script(prompt)
+        script = make_script(prompt, gemini_api_key)
         
         # Step 2: Initialize ElevenLabs and get voice
         job.meta['progress'] = 30
@@ -342,7 +506,7 @@ def gen_audio(prompt: str) -> str:
         # Send WebSocket notification
         manager.notify_progress(job_id, 30, 'Initializing text-to-speech engine', 2, total_steps)
         
-        el = ElevenLabs(api_key=os.getenv("XI_KEY"))
+        el = ElevenLabs(api_key=elevenlabs_api_key)
         
         # Get available voices and use the first one, or use a known voice ID
         try:
@@ -364,29 +528,130 @@ def gen_audio(prompt: str) -> str:
         audio_generator = el.generate(text=script, voice=voice_id)
         audio_bytes = b"".join(audio_generator)  # Convert generator to bytes
         
-        # Step 4: Upload to storage
+        # Optional Step 4: Generate thumbnail if requested
+        thumbnail_url = None
+        if generate_thumbnail:
+            job.meta['progress'] = 70
+            job.meta['current_step'] = 'Generating podcast thumbnail'
+            job.meta['step_number'] = 4
+            job.save_meta()
+            
+            # Send WebSocket notification
+            manager.notify_progress(job_id, 70, 'Generating podcast thumbnail', 4, total_steps)
+            
+            try:
+                # Generate thumbnail using Vertex AI Imagen API
+                print(f"Info: Generating podcast thumbnail using Vertex AI Imagen 3 Fast (cheapest model at $0.02/image)", file=sys.stderr)
+                
+                # Use custom thumbnail prompt if provided, otherwise create one based on the main prompt
+                if thumbnail_prompt:
+                    final_thumbnail_prompt = thumbnail_prompt
+                    print(f"Info: Using custom thumbnail prompt: {thumbnail_prompt[:50]}...", file=sys.stderr)
+                else:
+                    final_thumbnail_prompt = f"Create a modern podcast thumbnail image for: {prompt}. Professional design, vibrant colors, podcast microphone icon, clean typography, engaging visual style."
+                    print(f"Info: Using auto-generated thumbnail prompt based on main prompt", file=sys.stderr)
+                
+                # Get credentials and project info
+                project_id = creds_dict.get('google_cloud_project') or os.getenv("GOOGLE_CLOUD_PROJECT", "mcp-summer-school")
+                location_id = creds_dict.get('vertex_ai_region') or os.getenv("VERTEX_AI_REGION", "us-central1")
+                
+                # Create Google Cloud credentials for Imagen API
+                google_credentials, _ = create_google_cloud_credentials(creds_dict, creds_dict.get('google_cloud_credentials'))
+                google_credentials.refresh(Request())
+                access_token = google_credentials.token
+                
+                # Vertex AI Imagen API configuration (using cheapest model)
+                api_endpoint = f"{location_id}-aiplatform.googleapis.com"
+                # Use cheapest Imagen model by default, configurable via environment
+                model_id = os.getenv("IMAGEN_MODEL_ID", "imagen-3.0-fast-generate-001")  # Imagen 3 Fast - cheapest at $0.02/image
+                
+                # Prepare request payload for Imagen
+                request_data = {
+                    "instances": [{
+                        "prompt": final_thumbnail_prompt
+                    }],
+                    "parameters": {
+                        "sampleCount": 1,
+                        "aspectRatio": "1:1",  # Square thumbnail
+                        "safetyFilterLevel": "block_some",
+                        "personGeneration": "dont_allow"
+                    }
+                }
+                
+                # Submit image generation request
+                url = f"https://{api_endpoint}/v1/projects/{project_id}/locations/{location_id}/publishers/google/models/{model_id}:predict"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {access_token}"
+                }
+                
+                print(f"DEBUG THUMBNAIL: Submitting request to: {url}", file=sys.stderr)
+                
+                response = requests.post(url, headers=headers, json=request_data)
+                response.raise_for_status()
+                
+                result = response.json()
+                print(f"DEBUG THUMBNAIL: Response received", file=sys.stderr)
+                
+                # Extract image data from response
+                if "predictions" in result and len(result["predictions"]) > 0:
+                    prediction = result["predictions"][0]
+                    if "bytesBase64Encoded" in prediction:
+                        # Decode base64 image data
+                        import base64
+                        image_data = base64.b64decode(prediction["bytesBase64Encoded"])
+                        
+                        # Upload thumbnail to storage
+                        thumbnail_blob = bucket.blob(f"thumbnails/{uuid.uuid4()}.png")
+                        thumbnail_blob.upload_from_string(image_data, content_type="image/png")
+                        thumbnail_url = make_blob_public_safe(thumbnail_blob)
+                        
+                        print(f"DEBUG THUMBNAIL: Thumbnail generated and uploaded: {thumbnail_url}", file=sys.stderr)
+                    else:
+                        print(f"Warning: No image data in Imagen response", file=sys.stderr)
+                else:
+                    print(f"Warning: No predictions in Imagen response", file=sys.stderr)
+                            
+            except Exception as e:
+                print(f"Warning: Thumbnail generation failed: {e}", file=sys.stderr)
+                # Continue without thumbnail - not critical
+        
+        # Step 4/5: Upload audio to storage
+        next_step = 5 if generate_thumbnail else 4
         job.meta['progress'] = 90
         job.meta['current_step'] = 'Uploading audio file to cloud storage'
-        job.meta['step_number'] = 4
+        job.meta['step_number'] = next_step
         job.save_meta()
         
         # Send WebSocket notification
-        manager.notify_progress(job_id, 90, 'Uploading audio file to cloud storage', 4, total_steps)
+        manager.notify_progress(job_id, 90, 'Uploading audio file to cloud storage', next_step, total_steps)
         
         blob = bucket.blob(f"audio/{uuid.uuid4()}.mp3")
         blob.upload_from_string(audio_bytes)
+        audio_url = make_blob_public_safe(blob)
         
-        # Completion
+        # Completion and clear sensitive data
         job.meta['progress'] = 100
         job.meta['current_step'] = 'Complete'
+        job.meta = clear_sensitive_data(job.meta)
         job.save_meta()
         
         # Send completion notification
-        manager.notify_completion(job_id, blob.public_url)
+        manager.notify_completion(job_id, audio_url)
         
-        return blob.public_url
+        # Return both audio URL and thumbnail URL
+        result = {
+            "audio_url": audio_url,
+            "thumbnail_url": thumbnail_url
+        }
+        return result
     
     except Exception as e:
+        # Clear sensitive data even on error
+        job = get_current_job()
+        if job:
+            job.meta = clear_sensitive_data(job.meta)
+            job.save_meta()
         # Send error notification
         manager.notify_error(job_id, str(e))
         raise e
