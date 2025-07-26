@@ -1,6 +1,7 @@
 # app/mcp_models.py
 from pydantic import BaseModel, Field
-from typing import Dict, Optional, Literal, Union, Any
+from typing import Dict, Optional, Literal, Union, Any, List
+from enum import Enum
 
 class ImageInput(BaseModel):
     bytesBase64Encoded: Optional[str] = None
@@ -76,3 +77,135 @@ class MCPResponse(BaseModel):
     step_number: Optional[int] = None  # Current step number
     estimated_completion: Optional[str] = None  # Estimated completion time
     operation_name: Optional[str] = None  # Google Cloud operation name for manual tracking
+
+
+# ================================
+# MCP Protocol Specific Models
+# ================================
+
+class McpToolInputSchema(BaseModel):
+    """MCP tool input schema definition"""
+    type: str = "object"
+    properties: Dict[str, Any]
+    required: Optional[List[str]] = None
+
+
+class McpTool(BaseModel):
+    """MCP tool definition"""
+    name: str
+    description: str
+    inputSchema: McpToolInputSchema
+
+
+class McpToolCallArguments(BaseModel):
+    """Arguments for MCP tool calls"""
+    name: str
+    arguments: Dict[str, Any]
+
+
+class McpToolResult(BaseModel):
+    """Result of MCP tool execution"""
+    content: List[Dict[str, Any]]
+    isError: Optional[bool] = False
+
+
+class McpResourceTemplate(BaseModel):
+    """MCP resource URI template"""
+    uriTemplate: str
+    name: str
+    description: Optional[str] = None
+    mimeType: Optional[str] = None
+
+
+class McpResource(BaseModel):
+    """MCP resource definition"""
+    uri: str
+    name: str
+    description: Optional[str] = None
+    mimeType: Optional[str] = None
+
+
+class McpResourceContents(BaseModel):
+    """MCP resource content"""
+    uri: str
+    mimeType: Optional[str] = None
+    text: Optional[str] = None
+    blob: Optional[str] = None  # base64 encoded
+
+
+class McpPromptArgument(BaseModel):
+    """MCP prompt argument definition"""
+    name: str
+    description: Optional[str] = None
+    required: Optional[bool] = False
+
+
+class McpPrompt(BaseModel):
+    """MCP prompt definition"""
+    name: str
+    description: Optional[str] = None
+    arguments: Optional[List[McpPromptArgument]] = None
+
+
+class McpPromptMessage(BaseModel):
+    """MCP prompt message"""
+    role: Literal["user", "assistant"] = "user"
+    content: Dict[str, Any]
+
+
+class McpGetPromptResult(BaseModel):
+    """Result of getting a prompt"""
+    description: Optional[str] = None
+    messages: List[McpPromptMessage]
+
+
+# MCP Method Parameters
+class McpToolsListParams(BaseModel):
+    """Parameters for tools/list method"""
+    cursor: Optional[str] = None
+
+
+class McpToolsCallParams(BaseModel):
+    """Parameters for tools/call method"""
+    name: str
+    arguments: Dict[str, Any]
+
+
+class McpResourcesListParams(BaseModel):
+    """Parameters for resources/list method"""
+    cursor: Optional[str] = None
+
+
+class McpResourcesReadParams(BaseModel):
+    """Parameters for resources/read method"""
+    uri: str
+
+
+class McpPromptsListParams(BaseModel):
+    """Parameters for prompts/list method"""
+    cursor: Optional[str] = None
+
+
+class McpPromptsGetParams(BaseModel):
+    """Parameters for prompts/get method"""
+    name: str
+    arguments: Optional[Dict[str, Any]] = None
+
+
+# MCP Method Results
+class McpToolsListResult(BaseModel):
+    """Result of tools/list method"""
+    tools: List[McpTool]
+    nextCursor: Optional[str] = None
+
+
+class McpResourcesListResult(BaseModel):
+    """Result of resources/list method"""
+    resources: List[McpResource]
+    nextCursor: Optional[str] = None
+
+
+class McpPromptsListResult(BaseModel):
+    """Result of prompts/list method"""
+    prompts: List[McpPrompt]
+    nextCursor: Optional[str] = None

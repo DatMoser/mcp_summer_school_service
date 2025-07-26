@@ -10,3 +10,4 @@ google-api-core
 elevenlabs==1.2.2
 pydantic==2.5.0
 python-dotenv==1.0.1
+sse-starlette==1.8.2

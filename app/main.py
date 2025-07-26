@@ -1,7 +1,8 @@
 # app/main.py
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.websockets import WebSocketDisconnect
 from app.mcp_models import MCPRequest, MCPResponse, WritingStyleRequest, WritingStyleResponse
+from app.mcp_transport import mcp_transport
 from app.jobs import gen_video, gen_audio, fetch_operation_status, q, analyze_writing_style
 from app.credential_utils import get_credentials_or_default, validate_credentials, validate_video_parameters
 from google.cloud.storage import Blob
@@ -80,6 +81,60 @@ def resolve_gcs_url(url: str) -> str:
 
 app = FastAPI(title="MCP PdTx Video and Audio generator")
 
+# ================================
+# MCP Protocol Endpoints
+# ================================
+
+@app.post("/mcp-rpc")
+async def mcp_json_rpc_endpoint(request: Request):
+    """
+    MCP JSON-RPC 2.0 endpoint.
+    Handles all MCP protocol communication including initialization, tools, resources, and prompts.
+    """
+    return await mcp_transport.handle_json_rpc_post(request)
+
+@app.get("/mcp-sse/{client_id}")
+async def mcp_sse_endpoint(client_id: str):
+    """
+    MCP Server-Sent Events endpoint for real-time notifications.
+    Provides job progress updates and capability changes to MCP clients.
+    """
+    return await mcp_transport.handle_sse_connection(client_id)
+
+@app.get("/mcp-info")
+def mcp_info():
+    """
+    MCP server information and capabilities.
+    Returns details about available MCP features and connection status.
+    """
+    return {
+        "protocol": "Model Context Protocol (MCP)",
+        "version": "2025-06-18", 
+        "transport": ["HTTP POST", "Server-Sent Events"],
+        "capabilities": {
+            "tools": {
+                "listChanged": True,
+                "available": ["generate_video", "generate_audio", "analyze_writing_style", "check_job_status"]
+            },
+            "resources": {
+                "subscribe": True,
+                "listChanged": True,
+                "available": ["job://{job_id}"]
+            },
+            "prompts": {
+                "listChanged": True,
+                "available": ["video_generation", "podcast_generation", "style_analysis"]
+            }
+        },
+        "endpoints": {
+            "json_rpc": "/mcp-rpc",
+            "server_sent_events": "/mcp-sse/{client_id}",
+            "info": "/mcp-info"
+        },
+        "sse_connections": mcp_transport.get_connection_count(),
+        "connected_clients": len(mcp_transport.get_connected_clients())
+    }
+
 @app.get("/")
 def root():
     """
@@ -89,13 +144,20 @@ def root():
         "service": "MCP Video/Audio Generator",
         "status": "running",
         "version": "1.0.0",
+        "protocols": {
+            "rest": "Traditional REST API",
+            "mcp": "Model Context Protocol (JSON-RPC 2.0)"
+        },
         "endpoints": {
             "health": "/health",
             "create_job": "/mcp",
             "check_job": "/mcp/{job_id}",
             "analyze_style": "/mcp/analyze-style",
             "websocket": "/ws/{job_id}",
-            "docs": "/docs"
+            "docs": "/docs",
+            "mcp_info": "/mcp-info",
+            "mcp_rpc": "/mcp-rpc",
+            "mcp_sse": "/mcp-sse/{client_id}"
         }
     }
 
@@ -180,6 +242,24 @@ def health_check():
         health_status["components"]["websocket"] = {
             "status": "warning",
             "message": f"WebSocket check failed: {str(e)}"
+        }
+    
+    # Check MCP protocol
+    try:
+        from app.mcp_protocol import mcp_handler
+        from app.mcp_transport import mcp_transport
+        sse_connections = mcp_transport.get_connection_count()
+        health_status["components"]["mcp"] = {
+            "status": "healthy",
+            "message": "MCP protocol handler operational",
+            "protocol_version": "2025-06-18",
+            "sse_connections": sse_connections,
+            "initialized": mcp_handler.initialized
+        }
+    except Exception as e:
+        health_status["components"]["mcp"] = {
+            "status": "warning",
+            "message": f"MCP check failed: {str(e)}"
         }
     
     # Set overall status code for HTTP response

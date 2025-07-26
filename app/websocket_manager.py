@@ -123,6 +123,18 @@ class WebSocketManager:
         
         # Publish to Redis channel for async processing
         self.redis_client.publish(f"websocket:{job_id}", json.dumps(message))
+        
+        # Also notify MCP clients via SSE
+        try:
+            import asyncio
+            from app.mcp_transport import mcp_websocket_bridge
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(mcp_websocket_bridge.notify_job_progress(
+                    job_id, progress, current_step, step_number, total_steps, status
+                ))
+        except Exception:
+            pass  # Don't fail if MCP notification fails
     
     def notify_completion(self, job_id: str, download_url: str):
         """Notify about job completion"""
@@ -135,6 +147,18 @@ class WebSocketManager:
         }
         
         self.redis_client.publish(f"websocket:{job_id}", json.dumps(message))
+        
+        # Also notify MCP clients via SSE
+        try:
+            import asyncio
+            from app.mcp_transport import mcp_websocket_bridge
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(mcp_websocket_bridge.notify_job_completion(
+                    job_id, download_url
+                ))
+        except Exception:
+            pass  # Don't fail if MCP notification fails
     
     def notify_error(self, job_id: str, error_message: str):
         """Notify about job error"""
@@ -147,6 +171,18 @@ class WebSocketManager:
         }
         
         self.redis_client.publish(f"websocket:{job_id}", json.dumps(message))
+        
+        # Also notify MCP clients via SSE
+        try:
+            import asyncio
+            from app.mcp_transport import mcp_websocket_bridge
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(mcp_websocket_bridge.notify_job_error(
+                    job_id, error_message
+                ))
+        except Exception:
+            pass  # Don't fail if MCP notification fails
 
 # Global instance
 manager = WebSocketManager()
