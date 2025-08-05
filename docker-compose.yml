@@ -15,11 +15,13 @@ services:
       - redis
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - DOCKER_ENV=true
+      # File injection configuration (example - customize as needed)
+      # - INJECTED_FILE_PATH=/app/injected-config.json
+      # - INJECTED_FILE_CONTENT=ewogICJleGFtcGxlIjogInRydWUiLAogICJjb25maWciOiB7CiAgICAic2V0dGluZyI6ICJ2YWx1ZSIKICB9Cn0=
     env_file:
       - .env
-    volumes:
-      - .:/app
-    command: sh -c "if [ -n \"$GOOGLE_CLOUD_CREDENTIALS_PATH\" ]; then gcloud auth activate-service-account --key-file=$GOOGLE_CLOUD_CREDENTIALS_PATH; fi && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    # Removed volume mount to enforce Docker-only execution
 
   worker:
     build: .
@@ -27,11 +29,14 @@ services:
       - redis
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - DOCKER_ENV=true
+      # File injection configuration (example - customize as needed)
+      # - INJECTED_FILE_PATH=/app/injected-config.json
+      # - INJECTED_FILE_CONTENT=ewogICJleGFtcGxlIjogInRydWUiLAogICJjb25maWciOiB7CiAgICAic2V0dGluZyI6ICJ2YWx1ZSIKICB9Cn0=
     env_file:
       - .env
-    volumes:
-      - .:/app
-    command: sh -c "if [ -n \"$GOOGLE_CLOUD_CREDENTIALS_PATH\" ]; then gcloud auth activate-service-account --key-file=$GOOGLE_CLOUD_CREDENTIALS_PATH; fi && export PYTHONWARNINGS='ignore::UserWarning' && rq worker --url redis://redis:6379/0"
+    # Removed volume mount to enforce Docker-only execution
+    command: ["/usr/local/bin/startup.sh", "worker"]
 
 volumes:
   redis_data:

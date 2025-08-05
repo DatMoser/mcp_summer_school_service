@@ -13,7 +13,28 @@ import os
 import time
 import asyncio
 import json
+import sys
 from dotenv import load_dotenv, find_dotenv
+
+# Docker-only validation - ensure application can only run in Docker
+def validate_docker_environment():
+    """Ensure the application is running in a Docker container"""
+    docker_indicators = [
+        os.path.exists('/.dockerenv'),  # Standard Docker indicator file
+        os.path.exists('/proc/1/cgroup'),  # Process cgroup info
+        os.getenv('DOCKER_ENV') == 'true'  # Our custom environment variable
+    ]
+    
+    if not any(docker_indicators):
+        print("ERROR: This application can only be started through Docker!")
+        print("Please use 'docker-compose up' or deploy through Coolify")
+        print("Direct Python execution is not supported.")
+        sys.exit(1)
+    
+    print("✓ Docker environment validated - application starting")
+
+# Validate Docker environment before any other imports
+validate_docker_environment()
 
 # Load and print recognized .env files
 dotenv_path = find_dotenv()

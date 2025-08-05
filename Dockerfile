@@ -14,6 +14,18 @@ RUN apt-get update && apt-get install -y \
 
 COPY requirements.txt .
 RUN pip install -r requirements.txt
+
+# Copy startup script first, before copying the rest
+COPY startup.sh /usr/local/bin/startup.sh
+RUN chmod +x /usr/local/bin/startup.sh
+
+# Copy application code
 COPY . .
-ENV PORT 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Set Docker environment marker
+ENV DOCKER_ENV=true
+ENV PORT=8000
+
+# Use startup script as entrypoint - Docker-only execution
+ENTRYPOINT ["/usr/local/bin/startup.sh"]
+CMD ["app"]
