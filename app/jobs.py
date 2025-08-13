@@ -92,8 +92,57 @@ def sanitize_script_text(text: str) -> str:
     
     return text.strip()
 
-def make_script(prompt: str, api_key: str) -> str:
-    logger.debug("=== SCRIPT GENERATION START ===")
+def make_script_openai(prompt: str, api_key: str, model: str = "gpt-4o") -> str:
+    """Generate script using OpenAI GPT models"""
+    from openai import OpenAI
+    
+    logger.debug("=== OPENAI SCRIPT GENERATION START ===")
+    logger.debug(f"Input prompt: {prompt}")
+    logger.debug(f"API key provided: {'Yes' if api_key else 'No'}")
+    logger.debug(f"Model: {model}")
+    
+    client = OpenAI(api_key=api_key)
+    
+    # Enhanced prompt for natural human monologue
+    enhanced_prompt = f"""Create a natural, conversational podcast monologue based on this request: {prompt}
+
+Requirements:
+- Write as if speaking directly to listeners in a natural, human voice
+- Use conversational language with natural pauses and flow
+- Include verbal connectors like "you know", "well", "so", "now"
+- Vary sentence length for natural rhythm
+- Avoid any markdown formatting, bullet points, or structured lists
+- Sound like spontaneous speech, not written text
+- Use only standard punctuation: periods, commas, question marks, exclamation points
+- Make it engaging and personal, as if talking to a friend
+- Include natural transitions between ideas
+- Keep it conversational and authentic
+
+Generate ONLY the spoken content - no titles, headers, or formatting. Just the natural monologue text."""
+    
+    logger.debug("Calling OpenAI API for content generation...")
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "user", "content": enhanced_prompt}
+        ],
+        temperature=0.7,
+        max_tokens=2000
+    )
+    
+    script = response.choices[0].message.content
+    logger.debug(f"Raw script length: {len(script)} characters")
+    
+    # Sanitize the script to ensure clean, natural text
+    sanitized_script = sanitize_script_text(script)
+    logger.debug(f"Sanitized script length: {len(sanitized_script)} characters")
+    logger.debug("=== OPENAI SCRIPT GENERATION END ===")
+    
+    return sanitized_script
+
+def make_script_gemini(prompt: str, api_key: str) -> str:
+    """Generate script using Gemini models (legacy support)"""
+    logger.debug("=== GEMINI SCRIPT GENERATION START ===")
     logger.debug(f"Input prompt: {prompt}")
     logger.debug(f"API key provided: {'Yes' if api_key else 'No'}")
     logger.debug(f"API key length: {len(api_key) if api_key else 0}")
@@ -160,11 +209,113 @@ Generate ONLY the spoken content - no titles, headers, or formatting. Just the n
     sanitized_script = sanitize_script_text(script)
     logger.debug(f"Sanitized script length: {len(sanitized_script)} characters")
     logger.debug(f"Sanitized script preview: {sanitized_script[:200]}...")
-    logger.debug("=== SCRIPT GENERATION END ===")
+    logger.debug("=== GEMINI SCRIPT GENERATION END ===")
     
     return sanitized_script
 
-def analyze_writing_style(content: str, api_key: str) -> dict:
+def make_script(prompt: str, gemini_api_key: str = None, provider: str = "openai") -> str:
+    """
+    Generate script using specified provider (OpenAI by default, Gemini as fallback).
+    OpenAI key is managed internally via environment variable.
+    """
+    logger.debug(f"=== SCRIPT GENERATION DISPATCH - Provider: {provider} ===")
+    
+    if provider == "openai":
+        # Use internal OpenAI key from environment
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise ValueError("Internal OpenAI API key not configured on server")
+        return make_script_openai(prompt, openai_api_key)
+    elif provider == "gemini":
+        if gemini_api_key:
+            return make_script_gemini(prompt, gemini_api_key)
+        else:
+            raise ValueError("Gemini API key is required when using Gemini provider")
+    else:
+        raise ValueError(f"Unsupported provider: {provider}. Use 'openai' or 'gemini'.")
+
+def analyze_writing_style_openai(content: str, api_key: str, model: str = "gpt-4o") -> dict:
+    """
+    Analyze dialogue style for podcast generation using OpenAI GPT models.
+    """
+    from openai import OpenAI
+    
+    client = OpenAI(api_key=api_key)
+    
+    prompt = f"""You are a dialogue style expert for podcast generation. Given a style instruction, provide extremely detailed podcast generation settings that would make the speaker sound like the requested style/person.
+
+Analyze this instruction: "{content}"
+
+Provide EXHAUSTIVE, multi-sentence descriptions for each field. Each response should be 3-5 sentences minimum and capture every nuance, subtlety, and characteristic of the speaking style. Think like a voice coach who needs to train someone to perfectly mimic this style.
+
+Return ONLY a valid JSON object with podcast generation settings:
+
+{{
+    "tone": "Extremely detailed emotional tone analysis covering primary emotional register, secondary emotional undertones, vocal texture (warm/cold/harsh/smooth), emotional range and volatility, how emotions shift during different topics, underlying psychological state that comes through in voice, and specific vocal qualities that convey the emotional landscape",
+    "pace": "Comprehensive rhythm analysis including base speaking speed, acceleration patterns during excitement or emphasis, deceleration during thoughtful moments, strategic use of pauses for dramatic effect, breath patterns and timing, syllable emphasis patterns, and how pace varies with emotional state or topic complexity",
+    "vocabulary_level": "Exhaustive linguistic analysis covering word complexity preferences, technical vs colloquial language ratios, education level indicators in speech, use of industry jargon or specialized terms, sentence structure complexity, grammatical precision or intentional errors, regional dialect influences, and adaptation of vocabulary for different contexts",
+    "target_audience": "Detailed audience analysis including demographic targeting, educational background assumptions, shared cultural references, insider vs outsider language use, level of assumed prior knowledge, emotional appeals used to connect, social class indicators in communication style, and specific techniques used to maintain audience engagement",
+    "content_structure": "In-depth organizational analysis covering logical flow patterns, use of repetition for emphasis, tangential storytelling habits, argument building techniques, transition methods between topics, use of callbacks and references, structural predictability vs spontaneity, and how complex ideas are broken down for understanding",
+    "energy_level": "Comprehensive energy analysis including baseline enthusiasm level, peak energy moments and triggers, energy sustainability patterns, physical expressiveness that comes through in voice, vocal projection and volume dynamics, infectious enthusiasm techniques, energy recovery after intense moments, and how energy relates to audience engagement",
+    "formality": "Thorough register analysis covering professional vs casual language switching, respect for social hierarchies in speech, use of titles and honorifics, contraction usage patterns, slang integration, code-switching behaviors, situational formality adaptation, and boundary-setting through language choices",
+    "humor_style": "Exhaustive comedy analysis covering primary humor mechanisms (wit/sarcasm/observational/physical), timing and rhythm of joke delivery, self-deprecation vs other-directed humor ratios, use of humor for tension relief vs entertainment, cultural reference integration, improvisation vs prepared material preferences, recovery techniques from failed jokes, and humor's role in relationship building",
+    "empathy_level": "Detailed emotional intelligence analysis covering emotional validation techniques, perspective-taking demonstrations, vulnerability sharing patterns, active listening indicators in speech, emotional mirroring behaviors, comfort with others' emotional expressions, support-offering language patterns, and boundary management in emotional interactions",
+    "confidence_level": "Comprehensive self-assurance analysis covering authority projection techniques, uncertainty acknowledgment patterns, opinion statement boldness, correction-handling behaviors, expertise demonstration methods, insecurity masking or revealing tendencies, leadership communication styles, and confidence calibration for different topics",
+    "storytelling": "In-depth narrative analysis covering anecdote integration frequency, character development in stories, dramatic tension building, metaphor and analogy usage, personal vs universal story themes, story conclusion techniques, audience participation encouragement, sensory detail inclusion, and emotional arc construction in narratives",
+    "keyPhrases": ["Comprehensive list of signature expressions with context", "transitional phrases and connectors", "emphasis words and intensifiers", "filler words and verbal tics", "catch phrases and memorable sayings", "opening and closing formulas"],
+    "additionalInstructions": "Exhaustive implementation guide covering specific breathing patterns and vocal techniques, physical mannerisms that affect voice, emotional preparation before speaking, audience scanning and engagement techniques, recovery strategies for mistakes, energy management throughout long speaking sessions, voice warm-up preferences, microphone technique and proximity preferences, and environmental factors that optimize performance"
+}}
+
+Be extremely thorough - imagine you're creating a complete voice acting guide. Each field should contain multiple detailed sentences with specific examples and behavioral patterns.
+
+Instruction to analyze: {content}
+
+Return only valid JSON:"""
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.3,
+        max_tokens=1500
+    )
+    
+    try:
+        response_text = response.choices[0].message.content.strip()
+        
+        # Remove any markdown code block formatting if present
+        if response_text.startswith('```json'):
+            response_text = response_text[7:]
+        if response_text.startswith('```'):
+            response_text = response_text[3:]
+        if response_text.endswith('```'):
+            response_text = response_text[:-3]
+        
+        response_text = response_text.strip()
+        
+        return json.loads(response_text)
+    except json.JSONDecodeError as e:
+        print(f"JSON parsing error: {e}")
+        print(f"Raw response: {response.choices[0].message.content}")
+        # Fallback if JSON parsing fails
+        return {
+            "tone": "conversational",
+            "pace": "moderate", 
+            "vocabulary_level": "conversational",
+            "target_audience": "general public",
+            "content_structure": "structured",
+            "energy_level": "moderate",
+            "formality": "conversational",
+            "humor_style": "none",
+            "empathy_level": "moderate",
+            "confidence_level": "confident",
+            "storytelling": "direct",
+            "keyPhrases": ["well", "you know", "I think"],
+            "additionalInstructions": "Use natural, conversational speech patterns with clear articulation"
+        }
+
+def analyze_writing_style_gemini(content: str, api_key: str) -> dict:
     """
     Analyze dialogue style for podcast generation and return structured output using Gemini API.
     Takes a style instruction (e.g., "talk like Trump") and returns podcast generation settings.
@@ -238,6 +389,25 @@ Return only valid JSON:"""
             "keyPhrases": ["well", "you know", "I think"],
             "additionalInstructions": "Use natural, conversational speech patterns with clear articulation"
         }
+
+def analyze_writing_style(content: str, provider: str = "openai", gemini_api_key: str = None) -> dict:
+    """
+    Analyze dialogue style using specified provider (OpenAI by default, Gemini as fallback).
+    OpenAI key is managed internally via environment variable.
+    """
+    if provider == "openai":
+        # Use internal OpenAI key from environment
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise ValueError("Internal OpenAI API key not configured on server")
+        return analyze_writing_style_openai(content, openai_api_key)
+    elif provider == "gemini":
+        if gemini_api_key:
+            return analyze_writing_style_gemini(content, gemini_api_key)
+        else:
+            raise ValueError("Gemini API key is required when using Gemini provider")
+    else:
+        raise ValueError(f"Unsupported provider: {provider}. Use 'openai' or 'gemini'.")
 
 def gen_video(video_request: dict, credentials: dict = None) -> str:
     """
@@ -518,7 +688,7 @@ def fetch_operation_status(operation_name: str, credentials: dict = None) -> dic
         print(f"DEBUG FETCH: Error fetching operation status: {e}", file=sys.stderr)
         raise e
 
-def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = False, thumbnail_prompt: str = None) -> dict:
+def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = False, thumbnail_prompt: str = None, provider: str = "openai") -> dict:
     from rq import get_current_job
     from app.websocket_manager import manager
     import time
@@ -540,10 +710,13 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
         logger.debug(f"Credentials provided: {'Yes' if credentials else 'No'}")
         
         gemini_api_key = creds_dict.get('gemini_api_key') or os.getenv("GEMINI_API_KEY")
+        openai_api_key = creds_dict.get('openai_api_key') or os.getenv("OPENAI_API_KEY")
         elevenlabs_api_key = creds_dict.get('elevenlabs_api_key') or os.getenv("XI_KEY")
         bucket_name = creds_dict.get('gcs_bucket') or os.getenv("GCS_BUCKET")
         
+        logger.debug(f"Provider: {provider}")
         logger.debug(f"Gemini API key available: {'Yes' if gemini_api_key else 'No'}")
+        logger.debug(f"OpenAI API key available: {'Yes' if openai_api_key else 'No'}")
         logger.debug(f"ElevenLabs API key available: {'Yes' if elevenlabs_api_key else 'No'}")
         logger.debug(f"GCS bucket: {bucket_name}")
         
@@ -564,8 +737,8 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
         # Send WebSocket notification
         manager.notify_progress(job_id, 10, 'Generating script with AI', 1, total_steps)
         
-        logger.debug("Calling make_script function...")
-        script = make_script(prompt, gemini_api_key)
+        logger.debug(f"Calling make_script function with provider: {provider}...")
+        script = make_script(prompt, gemini_api_key, provider)
         logger.debug(f"Script generated successfully - length: {len(script)} characters")
         
         # Step 2: Initialize ElevenLabs and get voice

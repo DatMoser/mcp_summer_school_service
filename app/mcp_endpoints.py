@@ -101,6 +101,12 @@ class McpEndpoints:
                             "type": "string",
                             "description": "Custom prompt for thumbnail generation"
                         },
+                        "provider": {
+                            "type": "string",
+                            "description": "AI provider for text generation",
+                            "enum": ["openai", "gemini"],
+                            "default": "openai"
+                        },
                         "credentials": {
                             "type": "object",
                             "description": "User credentials for API access",
@@ -124,6 +130,12 @@ class McpEndpoints:
                         "style_instruction": {
                             "type": "string",
                             "description": "Style instruction like 'Talk like Trump' or 'Speak like a professor'"
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": "AI provider for style analysis",
+                            "enum": ["openai", "gemini"],
+                            "default": "openai"
                         },
                         "credentials": {
                             "type": "object",
@@ -306,9 +318,11 @@ class McpEndpoints:
             generate_thumbnail = arguments.get("generate_thumbnail", False)
             thumbnail_prompt = arguments.get("thumbnail_prompt")
             
+            provider = arguments.get("provider", "openai")
+            
             job = q.enqueue_call(
                 func=gen_audio, 
-                args=(prompt, creds_dict, generate_thumbnail, thumbnail_prompt), 
+                args=(prompt, creds_dict, generate_thumbnail, thumbnail_prompt, provider), 
                 job_id=job_id
             )
             
@@ -337,15 +351,28 @@ class McpEndpoints:
         try:
             # Get credentials
             creds_dict = get_credentials_or_default(arguments.get("credentials"))
+            provider = arguments.get("provider", "openai")
             
-            # Validate Gemini API key
-            if not creds_dict.get('gemini_api_key'):
+            # Validate API key for chosen provider (OpenAI is internal)
+            if provider == "gemini" and not creds_dict.get('gemini_api_key'):
                 return mcp_handler.create_error_response(
-                    request_id, McpError.TOOL_EXECUTION_ERROR, "Gemini API key is required for style analysis"
+                    request_id, McpError.TOOL_EXECUTION_ERROR, "Gemini API key is required when using Gemini provider for style analysis"
+                )
+            elif provider not in ["openai", "gemini"]:
+                return mcp_handler.create_error_response(
+                    request_id, McpError.TOOL_EXECUTION_ERROR, "Provider must be 'openai' or 'gemini'"
+                )
+            elif provider == "openai" and not creds_dict.get('openai_api_key'):
+                return mcp_handler.create_error_response(
+                    request_id, McpError.TOOL_EXECUTION_ERROR, "Internal OpenAI API key not configured on server"
                 )
             
-            # Analyze style
-            analysis_result = analyze_writing_style(style_instruction, creds_dict['gemini_api_key'])
+            # Analyze style with provider selection
+            analysis_result = analyze_writing_style(
+                style_instruction,
+                provider=provider,
+                gemini_api_key=creds_dict.get('gemini_api_key')
+            )
             
             result = McpToolResult(
                 content=[{

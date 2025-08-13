@@ -46,9 +46,11 @@ class MCPRequest(BaseModel):
     # Audio/Podcast specific parameters
     generate_thumbnail: Optional[bool] = False  # Generate podcast thumbnail for audio mode
     thumbnail_prompt: Optional[str] = None  # Custom prompt for thumbnail generation (if not provided, uses main prompt)
+    provider: Optional[Literal["gemini", "openai"]] = "openai"  # AI provider selection for text generation
 
 class WritingStyleRequest(BaseModel):
     prompt: str  # Style instruction like "Talk like Trump" or "Speak like a professor"
+    provider: Optional[Literal["gemini", "openai"]] = "openai"  # AI provider selection
     credentials: Optional[UserCredentials] = None
 
 class WritingStyleResponse(BaseModel):

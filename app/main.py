@@ -366,7 +366,7 @@ def create_task(req: MCPRequest):
         
         job = q.enqueue_call(func=gen_video, args=(video_request, creds_dict), job_id=job_id)
     else:
-        job = q.enqueue_call(func=gen_audio, args=(req.prompt, creds_dict, req.generate_thumbnail, req.thumbnail_prompt), job_id=job_id)
+        job = q.enqueue_call(func=gen_audio, args=(req.prompt, creds_dict, req.generate_thumbnail, req.thumbnail_prompt, req.provider), job_id=job_id)
     
     # Calculate total steps based on mode and options
     if req.mode == "audio":
@@ -501,13 +501,21 @@ def analyze_writing_style_endpoint(req: WritingStyleRequest):
     # Get credentials from request or use environment defaults
     creds_dict = get_credentials_or_default(req.credentials)
     
-    # Validate that we have a Gemini API key
-    if not creds_dict.get('gemini_api_key'):
-        raise HTTPException(status_code=400, detail="Gemini API key is required for writing style analysis")
+    # Validate that we have the required API key for the chosen provider (OpenAI is internal)
+    if req.provider == "gemini" and not creds_dict.get('gemini_api_key'):
+        raise HTTPException(status_code=400, detail="Gemini API key is required when using Gemini provider for writing style analysis")
+    elif req.provider not in ["openai", "gemini"]:
+        raise HTTPException(status_code=400, detail="Provider must be 'openai' or 'gemini'")
+    elif req.provider == "openai" and not creds_dict.get('openai_api_key'):
+        raise HTTPException(status_code=500, detail="Internal OpenAI API key not configured on server")
     
     try:
-        # Call the analysis function
-        result = analyze_writing_style(req.prompt, creds_dict['gemini_api_key'])
+        # Call the analysis function with provider selection
+        result = analyze_writing_style(
+            req.prompt, 
+            provider=req.provider,
+            gemini_api_key=creds_dict.get('gemini_api_key')
+        )
         
         # Return the structured response
         return WritingStyleResponse(**result)

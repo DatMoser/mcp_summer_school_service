@@ -8,6 +8,7 @@ from google.auth import default
 from google import generativeai as genai
 from google.cloud import storage
 from elevenlabs.client import ElevenLabs
+from openai import OpenAI
 from app.mcp_models import UserCredentials, VideoGenerationParameters
 
 # Supported video generation models
@@ -57,6 +58,7 @@ def get_credentials_or_default(user_creds: Optional[UserCredentials]) -> Dict[st
     """
     return {
         'gemini_api_key': user_creds.gemini_api_key if user_creds else None or os.getenv("GEMINI_API_KEY"),
+        'openai_api_key': os.getenv("OPENAI_API_KEY"),  # Always use internal OpenAI key
         'google_cloud_credentials': user_creds.google_cloud_credentials if user_creds else None,
         'google_cloud_project': user_creds.google_cloud_project if user_creds else None or os.getenv("GOOGLE_CLOUD_PROJECT", "mcp-summer-school"),
         'vertex_ai_region': user_creds.vertex_ai_region if user_creds else None or os.getenv("VERTEX_AI_REGION", "us-central1"),
@@ -111,9 +113,13 @@ def validate_credentials(creds_dict: Dict[str, Any]) -> Tuple[bool, Optional[str
     Returns (is_valid, error_message) tuple.
     """
     try:
-        # Check Gemini API key
-        if not creds_dict['gemini_api_key']:
-            return False, "Gemini API key is required"
+        # OpenAI is always available via internal key, check if Gemini is also available
+        has_gemini = bool(creds_dict.get('gemini_api_key'))
+        has_openai = bool(creds_dict.get('openai_api_key'))  # Internal key
+        
+        # At least OpenAI should be available (internal), but validate it exists
+        if not has_openai:
+            return False, "Internal OpenAI API key not configured on server"
         
         # Check Google Cloud credentials
         if not creds_dict['google_cloud_project']:
@@ -136,8 +142,13 @@ def validate_credentials(creds_dict: Dict[str, Any]) -> Tuple[bool, Optional[str
         except Exception as e:
             return False, f"Cannot create storage client: {str(e)}"
         
-        # Basic validation for Gemini API key (just check format)
-        if not creds_dict['gemini_api_key'] or len(creds_dict['gemini_api_key']) < 20:
+        # Basic validation for API keys
+        # OpenAI key is internal - validate it exists and has reasonable length
+        if creds_dict.get('openai_api_key') and len(creds_dict['openai_api_key']) < 20:
+            return False, "Internal OpenAI API key appears to be invalid (too short)"
+        
+        # Gemini key is optional and user-provided
+        if creds_dict.get('gemini_api_key') and len(creds_dict['gemini_api_key']) < 20:
             return False, "Gemini API key appears to be invalid (too short)"
         
         # Basic validation for ElevenLabs (only if provided)
@@ -158,9 +169,10 @@ def clear_sensitive_data(job_meta: Dict[str, Any]) -> Dict[str, Any]:
     """
     cleaned_meta = job_meta.copy()
     
-    # Remove sensitive keys
+    # Remove sensitive keys (OpenAI key is internal so still needs to be cleared from job metadata)
     sensitive_keys = [
-        'gemini_api_key', 
+        'gemini_api_key',
+        'openai_api_key',
         'google_cloud_credentials', 
         'elevenlabs_api_key',
         'credentials'
