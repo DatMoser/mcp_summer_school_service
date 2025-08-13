@@ -1,5 +1,5 @@
 # app/jobs.py
-import uuid, os, tempfile, subprocess, json, time, requests, sys
+import uuid, os, tempfile, subprocess, json, time, requests, sys, logging
 from google.cloud import storage
 from google import generativeai as genai
 from google.auth import default
@@ -44,6 +44,15 @@ def make_blob_public_safe(blob: Blob) -> str:
             # Re-raise other exceptions
             raise e
 
+# Setup logging for debug output
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
 # Redis connection and queue setup
 redis_conn = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
 q = Queue(connection=redis_conn)
@@ -84,9 +93,15 @@ def sanitize_script_text(text: str) -> str:
     return text.strip()
 
 def make_script(prompt: str, api_key: str) -> str:
+    logger.debug("=== SCRIPT GENERATION START ===")
+    logger.debug(f"Input prompt: {prompt}")
+    logger.debug(f"API key provided: {'Yes' if api_key else 'No'}")
+    logger.debug(f"API key length: {len(api_key) if api_key else 0}")
+    
     # Always use provided API key - no fallback to global configuration
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-2.5-flash")
+    logger.debug("Gemini model configured: gemini-2.5-flash")
     
     # Enhanced prompt for natural human monologue
     enhanced_prompt = f"""Create a natural, conversational podcast monologue based on this request: {prompt}
@@ -105,11 +120,49 @@ Requirements:
 
 Generate ONLY the spoken content - no titles, headers, or formatting. Just the natural monologue text."""
     
+    logger.debug(f"Enhanced prompt length: {len(enhanced_prompt)} characters")
+    logger.debug(f"Enhanced prompt preview: {enhanced_prompt[:200]}...")
+    
+    logger.debug("Calling Gemini API for content generation...")
     response = model.generate_content(enhanced_prompt)
-    script = response.text
+    logger.debug("Gemini API response received")
+    
+    # Handle multi-part responses by extracting text from parts
+    logger.debug(f"Response has parts attribute: {hasattr(response, 'parts')}")
+    logger.debug(f"Response has candidates attribute: {hasattr(response, 'candidates')}")
+    
+    if hasattr(response, 'parts') and response.parts:
+        logger.debug(f"Processing response.parts - found {len(response.parts)} parts")
+        script = ''.join(part.text for part in response.parts if hasattr(part, 'text'))
+        logger.debug("Used response.parts method for text extraction")
+    elif hasattr(response, 'candidates') and response.candidates:
+        logger.debug(f"Processing response.candidates - found {len(response.candidates)} candidates")
+        # Extract text from the first candidate's content parts
+        candidate = response.candidates[0]
+        logger.debug(f"Candidate has content: {hasattr(candidate, 'content')}")
+        if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+            parts_count = len(candidate.content.parts)
+            logger.debug(f"Candidate content has {parts_count} parts")
+            script = ''.join(part.text for part in candidate.content.parts if hasattr(part, 'text'))
+            logger.debug("Used candidate.content.parts method for text extraction")
+        else:
+            script = response.text  # Fallback for simple responses
+            logger.debug("Used response.text fallback for simple response")
+    else:
+        script = response.text  # Fallback for simple responses
+        logger.debug("Used response.text fallback - no parts or candidates found")
+    
+    logger.debug(f"Raw script length: {len(script)} characters")
+    logger.debug(f"Raw script preview: {script[:200]}...")
     
     # Sanitize the script to ensure clean, natural text
-    return sanitize_script_text(script)
+    logger.debug("Starting script sanitization...")
+    sanitized_script = sanitize_script_text(script)
+    logger.debug(f"Sanitized script length: {len(sanitized_script)} characters")
+    logger.debug(f"Sanitized script preview: {sanitized_script[:200]}...")
+    logger.debug("=== SCRIPT GENERATION END ===")
+    
+    return sanitized_script
 
 def analyze_writing_style(content: str, api_key: str) -> dict:
     """
@@ -474,18 +527,34 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
     job_id = job.get_id()
     total_steps = 5 if generate_thumbnail else 4
     
+    logger.debug("=== AUDIO GENERATION START ===")
+    logger.debug(f"Job ID: {job_id}")
+    logger.debug(f"Input prompt: {prompt}")
+    logger.debug(f"Generate thumbnail: {generate_thumbnail}")
+    logger.debug(f"Thumbnail prompt: {thumbnail_prompt}")
+    logger.debug(f"Total steps: {total_steps}")
+    
     try:
         # Get credentials (user-provided or environment defaults)
         creds_dict = credentials if credentials else {}
+        logger.debug(f"Credentials provided: {'Yes' if credentials else 'No'}")
+        
         gemini_api_key = creds_dict.get('gemini_api_key') or os.getenv("GEMINI_API_KEY")
         elevenlabs_api_key = creds_dict.get('elevenlabs_api_key') or os.getenv("XI_KEY")
         bucket_name = creds_dict.get('gcs_bucket') or os.getenv("GCS_BUCKET")
         
+        logger.debug(f"Gemini API key available: {'Yes' if gemini_api_key else 'No'}")
+        logger.debug(f"ElevenLabs API key available: {'Yes' if elevenlabs_api_key else 'No'}")
+        logger.debug(f"GCS bucket: {bucket_name}")
+        
         # Create storage client with appropriate credentials
+        logger.debug("Creating storage client...")
         storage_client = create_storage_client(creds_dict)
         bucket = storage_client.bucket(bucket_name)
+        logger.debug("Storage client created successfully")
         
         # Step 1: Generate script
+        logger.debug("STEP 1: Starting script generation")
         job.meta['progress'] = 10
         job.meta['current_step'] = 'Generating script with AI'
         job.meta['step_number'] = 1
@@ -495,9 +564,12 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
         # Send WebSocket notification
         manager.notify_progress(job_id, 10, 'Generating script with AI', 1, total_steps)
         
+        logger.debug("Calling make_script function...")
         script = make_script(prompt, gemini_api_key)
+        logger.debug(f"Script generated successfully - length: {len(script)} characters")
         
         # Step 2: Initialize ElevenLabs and get voice
+        logger.debug("STEP 2: Initializing ElevenLabs TTS")
         job.meta['progress'] = 30
         job.meta['current_step'] = 'Initializing text-to-speech engine'
         job.meta['step_number'] = 2
@@ -506,17 +578,27 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
         # Send WebSocket notification
         manager.notify_progress(job_id, 30, 'Initializing text-to-speech engine', 2, total_steps)
         
+        logger.debug("Creating ElevenLabs client...")
         el = ElevenLabs(api_key=elevenlabs_api_key)
+        logger.debug("ElevenLabs client created")
         
         # Get available voices and use the first one, or use a known voice ID
         try:
+            logger.debug("Fetching available voices...")
             voices = el.voices.get_all()
+            voice_count = len(voices.voices) if voices.voices else 0
+            logger.debug(f"Found {voice_count} available voices")
+            
             voice_id = voices.voices[0].voice_id if voices.voices else "pNInz6obpgDQGcFmaJgB"  # Default Adam voice ID
-        except:
+            voice_name = voices.voices[0].name if voices.voices else "Adam (default)"
+            logger.debug(f"Selected voice: {voice_name} (ID: {voice_id})")
+        except Exception as e:
             # Fallback to a known voice ID for Adam
             voice_id = "pNInz6obpgDQGcFmaJgB"
+            logger.debug(f"Voice fetch failed, using fallback voice ID: {voice_id}, Error: {e}")
         
         # Step 3: Generate audio
+        logger.debug("STEP 3: Converting text to speech")
         job.meta['progress'] = 60
         job.meta['current_step'] = 'Converting text to speech'
         job.meta['step_number'] = 3
@@ -525,12 +607,17 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
         # Send WebSocket notification
         manager.notify_progress(job_id, 60, 'Converting text to speech', 3, total_steps)
         
+        logger.debug(f"Generating audio with voice {voice_id}...")
+        logger.debug(f"Text to convert: {len(script)} characters")
         audio_generator = el.generate(text=script, voice=voice_id)
+        logger.debug("Audio generation started, converting generator to bytes...")
         audio_bytes = b"".join(audio_generator)  # Convert generator to bytes
+        logger.debug(f"Audio generated successfully - size: {len(audio_bytes)} bytes")
         
         # Optional Step 4: Generate thumbnail if requested
         thumbnail_url = None
         if generate_thumbnail:
+            logger.debug("STEP 4: Starting thumbnail generation")
             job.meta['progress'] = 70
             job.meta['current_step'] = 'Generating podcast thumbnail'
             job.meta['step_number'] = 4
@@ -541,29 +628,39 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
             
             try:
                 # Generate thumbnail using Vertex AI Imagen API
+                logger.debug("Generating podcast thumbnail using Vertex AI Imagen 3 Fast")
                 print(f"Info: Generating podcast thumbnail using Vertex AI Imagen 3 Fast (cheapest model at $0.02/image)", file=sys.stderr)
                 
                 # Use custom thumbnail prompt if provided, otherwise create one based on the main prompt
                 if thumbnail_prompt:
                     final_thumbnail_prompt = thumbnail_prompt
+                    logger.debug(f"Using custom thumbnail prompt: {thumbnail_prompt}")
                     print(f"Info: Using custom thumbnail prompt: {thumbnail_prompt[:50]}...", file=sys.stderr)
                 else:
                     final_thumbnail_prompt = f"Create a modern podcast thumbnail image for: {prompt}. Professional design, vibrant colors, podcast microphone icon, clean typography, engaging visual style."
+                    logger.debug("Using auto-generated thumbnail prompt based on main prompt")
+                    logger.debug(f"Auto-generated prompt: {final_thumbnail_prompt}")
                     print(f"Info: Using auto-generated thumbnail prompt based on main prompt", file=sys.stderr)
                 
                 # Get credentials and project info
                 project_id = creds_dict.get('google_cloud_project') or os.getenv("GOOGLE_CLOUD_PROJECT", "mcp-summer-school")
                 location_id = creds_dict.get('vertex_ai_region') or os.getenv("VERTEX_AI_REGION", "us-central1")
+                logger.debug(f"Project ID: {project_id}")
+                logger.debug(f"Location ID: {location_id}")
                 
                 # Create Google Cloud credentials for Imagen API
+                logger.debug("Creating Google Cloud credentials for Imagen API...")
                 google_credentials, _ = create_google_cloud_credentials(creds_dict, creds_dict.get('google_cloud_credentials'))
                 google_credentials.refresh(Request())
                 access_token = google_credentials.token
+                logger.debug("Google Cloud credentials refreshed successfully")
                 
                 # Vertex AI Imagen API configuration (using cheapest model)
                 api_endpoint = f"{location_id}-aiplatform.googleapis.com"
                 # Use cheapest Imagen model by default, configurable via environment
                 model_id = os.getenv("IMAGEN_MODEL_ID", "imagen-3.0-fast-generate-001")  # Imagen 3 Fast - cheapest at $0.02/image
+                logger.debug(f"API endpoint: {api_endpoint}")
+                logger.debug(f"Model ID: {model_id}")
                 
                 # Prepare request payload for Imagen
                 request_data = {
@@ -618,6 +715,7 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
         
         # Step 4/5: Upload audio to storage
         next_step = 5 if generate_thumbnail else 4
+        logger.debug(f"STEP {next_step}: Uploading audio file to cloud storage")
         job.meta['progress'] = 90
         job.meta['current_step'] = 'Uploading audio file to cloud storage'
         job.meta['step_number'] = next_step
@@ -626,11 +724,20 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
         # Send WebSocket notification
         manager.notify_progress(job_id, 90, 'Uploading audio file to cloud storage', next_step, total_steps)
         
-        blob = bucket.blob(f"audio/{uuid.uuid4()}.mp3")
+        audio_filename = f"audio/{uuid.uuid4()}.mp3"
+        logger.debug(f"Creating blob with filename: {audio_filename}")
+        blob = bucket.blob(audio_filename)
+        
+        logger.debug("Uploading audio bytes to cloud storage...")
         blob.upload_from_string(audio_bytes)
+        logger.debug("Audio upload completed")
+        
+        logger.debug("Making blob public...")
         audio_url = make_blob_public_safe(blob)
+        logger.debug(f"Audio URL generated: {audio_url}")
         
         # Completion and clear sensitive data
+        logger.debug("Finalizing job completion...")
         job.meta['progress'] = 100
         job.meta['current_step'] = 'Complete'
         job.meta = clear_sensitive_data(job.meta)
@@ -638,20 +745,31 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
         
         # Send completion notification
         manager.notify_completion(job_id, audio_url)
+        logger.debug("Completion notification sent")
         
         # Return both audio URL and thumbnail URL
         result = {
             "audio_url": audio_url,
             "thumbnail_url": thumbnail_url
         }
+        logger.debug(f"Final result: {result}")
+        logger.debug("=== AUDIO GENERATION END ===")
         return result
     
     except Exception as e:
+        logger.error(f"=== AUDIO GENERATION ERROR ===")
+        logger.error(f"Error in gen_audio: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        
         # Clear sensitive data even on error
         job = get_current_job()
         if job:
+            logger.debug("Clearing sensitive data from job metadata...")
             job.meta = clear_sensitive_data(job.meta)
             job.save_meta()
+        
         # Send error notification
+        logger.debug("Sending error notification...")
         manager.notify_error(job_id, str(e))
+        logger.error("=== AUDIO GENERATION ERROR END ===")
         raise e

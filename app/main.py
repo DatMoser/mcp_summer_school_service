@@ -1,6 +1,8 @@
 # app/main.py
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.websockets import WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from app.auth_middleware import APIKeyMiddleware
 from app.mcp_models import MCPRequest, MCPResponse, WritingStyleRequest, WritingStyleResponse
 from app.mcp_transport import mcp_transport
 from app.jobs import gen_video, gen_audio, fetch_operation_status, q, analyze_writing_style
@@ -102,6 +104,22 @@ def resolve_gcs_url(url: str) -> str:
 
 app = FastAPI(title="MCP PdTx Video and Audio generator")
 
+# Configure CORS origins from environment variable
+allowed_origins = os.getenv("CORS_ORIGINS", "*").split(",")
+allowed_origins = [origin.strip() for origin in allowed_origins]
+
+# Add CORS middleware to allow client-side requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Add API key middleware to protect all endpoints
+app.add_middleware(APIKeyMiddleware)
+
 # ================================
 # MCP Protocol Endpoints
 # ================================
@@ -171,6 +189,7 @@ def root():
         },
         "endpoints": {
             "health": "/health",
+            "validate": "/validate",
             "create_job": "/mcp",
             "check_job": "/mcp/{job_id}",
             "analyze_style": "/mcp/analyze-style",
@@ -181,6 +200,22 @@ def root():
             "mcp_sse": "/mcp-sse/{client_id}"
         }
     }
+
+@app.get("/validate")
+def validate_api_key(request: Request):
+    """
+    Validate API key endpoint.
+    Returns a simple response when API key is detected.
+    """
+    import os
+    
+    api_key = os.getenv("API_KEY")
+    provided_api_key = request.headers.get("X-API-Key")
+    
+    if not api_key or not provided_api_key or provided_api_key != api_key:
+        return {"valid": False}
+    
+    return {"valid": True}
 
 @app.get("/health")
 def health_check():

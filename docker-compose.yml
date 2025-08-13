@@ -16,7 +16,9 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DOCKER_ENV=true
-      # File injection configuration (example - customize as needed)
+      - API_KEY=test-secret-key-12345
+      - CORS_ORIGINS=*
+      # File injection configuration temporarily disabled for API key testing
       # - INJECTED_FILE_PATH=/app/injected-config.json
       # - INJECTED_FILE_CONTENT=ewogICJleGFtcGxlIjogInRydWUiLAogICJjb25maWciOiB7CiAgICAic2V0dGluZyI6ICJ2YWx1ZSIKICB9Cn0=
     env_file:
@@ -30,7 +32,9 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DOCKER_ENV=true
-      # File injection configuration (example - customize as needed)
+      - API_KEY=test-secret-key-12345
+      - CORS_ORIGINS=*
+      # File injection configuration temporarily disabled for API key testing
       # - INJECTED_FILE_PATH=/app/injected-config.json
       # - INJECTED_FILE_CONTENT=ewogICJleGFtcGxlIjogInRydWUiLAogICJjb25maWciOiB7CiAgICAic2V0dGluZyI6ICJ2YWx1ZSIKICB9Cn0=
     env_file:

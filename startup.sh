@@ -60,6 +60,16 @@ if [ -n "$GOOGLE_CLOUD_CREDENTIALS_PATH" ]; then
     echo "Activating Google Cloud service account..."
     if gcloud auth activate-service-account --key-file="$GOOGLE_CLOUD_CREDENTIALS_PATH"; then
         echo "✓ Google Cloud authentication successful"
+        
+        # Show authenticated account details
+        ACCOUNT_EMAIL=$(gcloud config get-value account 2>/dev/null)
+        PROJECT_ID=$(gcloud config get-value project 2>/dev/null)
+        echo "✓ Authenticated as: $ACCOUNT_EMAIL"
+        if [ -n "$PROJECT_ID" ]; then
+            echo "✓ Default project: $PROJECT_ID"
+        else
+            echo "ℹ No default project set"
+        fi
     else
         echo "WARNING: Google Cloud authentication failed"
     fi
