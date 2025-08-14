@@ -2,7 +2,7 @@
 // Run with: node test_client_scenario.js
 
 const backendUrl = 'http://localhost:8081';
-const apiKey = 'test-secret-key-12345';
+const apiKey = process.env.API_KEY || 'your-api-key';
 
 async function testHealthEndpoint() {
   console.log('=== Testing Client-Side Fetch Request ===\n');
@@ -50,7 +50,7 @@ async function testWithWrongKey() {
     const response = await fetch(`${backendUrl}/health`, {
       method: 'GET',
       headers: {
-        'X-API-Key': 'wrong-key-12345',
+        'X-API-Key': 'wrong-key',
       },
     });
     

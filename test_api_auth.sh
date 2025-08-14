@@ -9,7 +9,7 @@ echo ""
 echo ""
 
 echo "2. Testing with correct API key (should succeed):"
-curl -i -H "X-API-Key: test-secret-key-12345" http://localhost:8081/health
+curl -i -H "X-API-Key: ${API_KEY:-your-api-key}" http://localhost:8081/health
 echo ""
 echo ""
 
@@ -19,17 +19,17 @@ echo ""
 echo ""
 
 echo "4. Testing case sensitivity (should fail):"
-curl -i -H "x-api-key: test-secret-key-12345" http://localhost:8081/health
+curl -i -H "x-api-key: ${API_KEY:-your-api-key}" http://localhost:8081/health
 echo ""
 echo ""
 
 echo "5. Testing MCP endpoint with correct API key:"
-curl -i -H "X-API-Key: test-secret-key-12345" http://localhost:8081/mcp-info
+curl -i -H "X-API-Key: ${API_KEY:-your-api-key}" http://localhost:8081/mcp-info
 echo ""
 echo ""
 
 echo "6. Testing root endpoint with correct API key:"
-curl -i -H "X-API-Key: test-secret-key-12345" http://localhost:8081/
+curl -i -H "X-API-Key: ${API_KEY:-your-api-key}" http://localhost:8081/
 echo ""
 echo ""
 
