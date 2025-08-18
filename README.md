@@ -184,6 +184,8 @@ curl -X POST "http://localhost:8000/mcp" \
   -d '{
     "mode": "audio",
     "prompt": "Create a 2-minute podcast about the future of artificial intelligence",
+    "audio_format": "m4a",
+    "max_duration_seconds": 120,
     "generate_thumbnail": true,
     "thumbnail_prompt": "Futuristic AI podcast thumbnail with robot brain, glowing circuits, and 'AI Future' text",
     "credentials": {
@@ -281,6 +283,8 @@ curl -X POST "http://localhost:8000/mcp" \
   -d '{
     "mode": "audio",
     "prompt": "Quick podcast summary",
+    "audio_format": "mp3",
+    "max_duration_seconds": 30,
     "generate_thumbnail": false,
     "credentials": {...}
   }'
@@ -313,6 +317,8 @@ curl -X POST "http://localhost:8000/mcp" \
   -d '{
     "mode": "audio",
     "prompt": "Professional podcast",
+    "audio_format": "wav",
+    "max_duration_seconds": 180,
     "generate_thumbnail": true,
     "thumbnail_prompt": "Elegant professional podcast cover with microphone, gold accents, premium typography",
     "credentials": {...}
@@ -328,6 +334,8 @@ curl -X POST "http://localhost:8000/mcp" \\
   -d '{
     "mode": "audio",
     "prompt": "Discuss the economic impact of renewable energy adoption",
+    "audio_format": "m4a",
+    "max_duration_seconds": 300,
     "generate_thumbnail": true,
     "thumbnail_prompt": "Clean energy podcast cover: solar panels, wind turbines, green economy icons, modern design",
     "credentials": {...}
@@ -380,6 +388,134 @@ Provide credentials in each API request:
 
 Set credentials via environment variables and omit the `credentials` field in requests.
 
+## 🔄 Client Workflow Guide
+
+This section explains the recommended workflow for clients to submit jobs, monitor progress, and retrieve final results.
+
+### Complete Workflow Example
+
+**Step 1: Submit a Job**
+```bash
+curl -X POST "http://localhost:8000/mcp" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "mode": "audio",
+    "prompt": "Create a podcast about AI trends",
+    "audio_format": "m4a",
+    "max_duration_seconds": 60,
+    "generate_thumbnail": true,
+    "thumbnail_prompt": "Modern podcast cover with AI theme"
+  }'
+```
+
+**Response:**
+```json
+{
+  "job_id": "abc123-def456-789",
+  "status": "queued",
+  "progress": 0,
+  "current_step": "Job queued, waiting to start",
+  "total_steps": 5
+}
+```
+
+**Step 2: Monitor Progress (Choose One Method)**
+
+**Option A: WebSocket (Recommended for Real-time Updates)**
+```javascript
+const ws = new WebSocket('ws://localhost:8000/ws/abc123-def456-789');
+
+ws.onmessage = (event) => {
+  const update = JSON.parse(event.data);
+  console.log(`Progress: ${update.progress}% - ${update.current_step}`);
+  
+  if (update.status === 'finished') {
+    // Job complete - see Step 3 for handling final result
+    handleJobCompletion(update);
+  }
+};
+```
+
+**Option B: Polling**
+```bash
+# Check status periodically
+curl -H "X-API-Key: your-api-key" \
+  "http://localhost:8000/mcp/abc123-def456-789"
+```
+
+**Option C: Long-polling (Wait for Completion)**
+```bash
+# Blocks until job finishes or times out
+curl -H "X-API-Key: your-api-key" \
+  "http://localhost:8000/mcp/abc123-def456-789/wait"
+```
+
+**Step 3: Handle Final Results**
+
+When the job completes, you'll receive a comprehensive response with all audio assets:
+
+```json
+{
+  "job_id": "abc123-def456-789",
+  "status": "finished",
+  "download_url": "https://storage.googleapis.com/.../audio.mp3",
+  "display_audio_url": "https://storage.googleapis.com/.../audio.mp3",
+  "download_audio_url": "https://storage.googleapis.com/.../audio.m4a",
+  "thumbnail_url": "https://storage.googleapis.com/.../thumbnail.png",
+  "audio_duration_seconds": 58.3,
+  "progress": 100,
+  "current_step": "Complete",
+  "total_steps": 5,
+  "step_number": 5
+}
+```
+
+### URL Field Usage Guide
+
+**For Web Applications:**
+```javascript
+// Use display_audio_url for web players (always MP3, optimized for streaming)
+audioElement.src = result.display_audio_url;
+
+// Use thumbnail_url for visual representation
+thumbnailImg.src = result.thumbnail_url;
+```
+
+**For Download Features:**
+```javascript
+// Use download_audio_url for download links (user's requested format)
+downloadLink.href = result.download_audio_url;
+downloadLink.download = `podcast.${getFileExtension(result.download_audio_url)}`;
+```
+
+**For Mobile Apps:**
+```javascript
+// Choose format based on platform needs
+const audioUrl = platform === 'ios' ? result.download_audio_url : result.display_audio_url;
+```
+
+### Error Handling
+
+**Job Failures:**
+```json
+{
+  "job_id": "abc123-def456-789",
+  "status": "failed",
+  "progress": 45,
+  "current_step": "Text-to-speech conversion failed",
+  "error": "ElevenLabs API rate limit exceeded"
+}
+```
+
+**Best Practices:**
+- ✅ Always check `status` field before using URLs
+- ✅ Handle `thumbnail_url: null` when thumbnails weren't requested
+- ✅ Use `audio_duration_seconds` for progress bars and UI
+- ✅ Implement retry logic for transient failures
+- ✅ Cache audio files locally when possible
+- ⚠️ WebSocket connections auto-disconnect after job completion
+
 ## 📋 API Reference
 
 ### Endpoints
@@ -415,6 +551,12 @@ Set credentials via environment variables and omit the `credentials` field in re
 
 ### Audio/Thumbnail Parameters
 
+- **audio_format**: Audio output format (default: "m4a")
+  - Supported formats: `"mp3"`, `"wav"`, `"m4a"`
+  - Each format is delivered exactly as requested with proper file extensions and MIME types
+- **max_duration_seconds**: Maximum audio duration in seconds (default: 60)
+  - Controls script length and audio generation time
+  - Longer duration = more content generated
 - **generate_thumbnail**: Boolean to enable thumbnail generation (audio mode only)
 - **thumbnail_prompt**: Custom prompt for thumbnail design (optional)
   - If not provided: Auto-generates based on main prompt
@@ -428,6 +570,58 @@ Set credentials via environment variables and omit the `credentials` field in re
 - `finished` - Complete, download_url available
 - `failed` - Error occurred
 - `not_found` - Invalid job_id
+
+### Audio Job Response Structure
+
+When checking the status of an audio generation job (`GET /mcp/{job_id}`), the response includes specialized fields for audio content:
+
+**Response Fields:**
+```json
+{
+  "job_id": "uuid-string",
+  "status": "finished",
+  "download_url": "https://storage.googleapis.com/bucket/audio/file.mp3",
+  "display_audio_url": "https://storage.googleapis.com/bucket/audio/file.mp3",
+  "download_audio_url": "https://storage.googleapis.com/bucket/audio/file.m4a",
+  "thumbnail_url": "https://storage.googleapis.com/bucket/thumbnails/image.png",
+  "audio_duration_seconds": 58.3,
+  "progress": 100,
+  "current_step": "Complete",
+  "total_steps": 5,
+  "step_number": 5
+}
+```
+
+**Audio URL Field Descriptions:**
+
+- **`download_url`**: *(Legacy/Compatibility)* Always points to the MP3 version for backward compatibility
+- **`display_audio_url`**: *(Optimized for Web)* Always MP3 format, optimized for web players and streaming
+  - Uses MP3 44.1kHz 128kbps for maximum compatibility
+  - Best for embedded players, web audio APIs, and real-time playback
+- **`download_audio_url`**: *(User-Requested Format)* Matches the `audio_format` parameter from the original request
+  - If `audio_format: "mp3"` → Same as `display_audio_url`
+  - If `audio_format: "m4a"` → High-quality M4A (AAC) version for offline use
+  - If `audio_format: "wav"` → Uncompressed WAV version for professional editing
+- **`thumbnail_url`**: *(Optional)* Generated image thumbnail if `generate_thumbnail: true` was requested
+- **`audio_duration_seconds`**: *(Audio Jobs Only)* Actual duration of the generated audio in seconds (decimal precision)
+
+**Format-Specific Use Cases:**
+- **Web Playback**: Use `display_audio_url` (always MP3) for consistent browser support
+- **Mobile Apps**: Use `download_audio_url` with `audio_format: "m4a"` for smaller file sizes
+- **Professional Editing**: Use `download_audio_url` with `audio_format: "wav"` for lossless quality
+- **Podcast Distribution**: Use `download_audio_url` with your preferred format for RSS feeds
+
+**Example Usage Patterns:**
+```javascript
+// For web audio player (guaranteed MP3 compatibility)
+audioElement.src = response.display_audio_url;
+
+// For download links (user's preferred format)
+downloadLink.href = response.download_audio_url;
+
+// For backward compatibility
+legacyPlayer.src = response.download_url;
+```
 
 ## 🏗️ Architecture
 

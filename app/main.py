@@ -366,7 +366,8 @@ def create_task(req: MCPRequest):
         
         job = q.enqueue_call(func=gen_video, args=(video_request, creds_dict), job_id=job_id)
     else:
-        job = q.enqueue_call(func=gen_audio, args=(req.prompt, creds_dict, req.generate_thumbnail, req.thumbnail_prompt, req.provider), job_id=job_id)
+        print(f"DEBUG: Regular REST API - audio_format={req.audio_format}, max_duration={req.max_duration_seconds}")
+        job = q.enqueue_call(func=gen_audio, args=(req.prompt, creds_dict, req.generate_thumbnail, req.thumbnail_prompt, req.provider, req.audio_format, req.max_duration_seconds), job_id=job_id)
     
     # Calculate total steps based on mode and options
     if req.mode == "audio":
@@ -426,13 +427,19 @@ def check(job_id: str):
     
     # Handle different result formats
     url = None
+    display_audio_url = None
+    download_audio_url = None
     thumbnail_url = None
+    audio_duration_seconds = None
     if job.is_finished and result:
         if isinstance(result, dict):
-            # Audio result format: {"audio_url": "...", "thumbnail_url": "..."}
+            # Audio result format: {"audio_url": "...", "display_audio_url": "...", "download_audio_url": "...", "thumbnail_url": "..."}
             if result.get("audio_url"):
-                url = resolve_gcs_url(result["audio_url"])
+                url = resolve_gcs_url(result["audio_url"])  # Backward compatibility
+                display_audio_url = resolve_gcs_url(result["display_audio_url"]) if result.get("display_audio_url") else url
+                download_audio_url = resolve_gcs_url(result["download_audio_url"]) if result.get("download_audio_url") else url
                 thumbnail_url = resolve_gcs_url(result["thumbnail_url"]) if result.get("thumbnail_url") else None
+                audio_duration_seconds = result.get("audio_duration_seconds")
             # Video format: {"status": "submitted", "operation_name": "...", "message": "..."}
             elif result.get("status") == "submitted" and result.get("operation_name"):
                 operation_name = result.get("operation_name")
@@ -482,7 +489,10 @@ def check(job_id: str):
         job_id=job_id, 
         status=job_status, 
         download_url=url,
+        display_audio_url=display_audio_url,
+        download_audio_url=download_audio_url,
         thumbnail_url=thumbnail_url,
+        audio_duration_seconds=audio_duration_seconds,
         progress=progress,
         current_step=current_step,
         total_steps=total_steps,

@@ -57,10 +57,109 @@ logger.addHandler(console_handler)
 redis_conn = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
 q = Queue(connection=redis_conn)
 
+def convert_audio_format(audio_bytes: bytes, source_format: str, target_format: str) -> tuple[bytes, str]:
+    """
+    Convert audio from one format to another using PyDub.
+    Returns (converted_audio_bytes, mime_type)
+    """
+    from pydub import AudioSegment
+    from io import BytesIO
+    
+    # Load audio from bytes
+    if source_format == "pcm":
+        # For raw PCM data from ElevenLabs, specify the audio parameters
+        audio = AudioSegment.from_file(
+            BytesIO(audio_bytes), 
+            format="raw", 
+            frame_rate=44100, 
+            channels=1, 
+            sample_width=2
+        )
+    else:
+        audio = AudioSegment.from_file(BytesIO(audio_bytes), format=source_format)
+    
+    # Convert to target format
+    output = BytesIO()
+    
+    if target_format == "m4a":
+        # Export as M4A (AAC in MP4 container)
+        audio.export(output, format="mp4", codec="aac")
+        mime_type = "audio/mp4"
+    elif target_format == "mp3":
+        audio.export(output, format="mp3")
+        mime_type = "audio/mpeg"
+    elif target_format == "wav":
+        audio.export(output, format="wav")
+        mime_type = "audio/wav"
+    else:
+        raise ValueError(f"Unsupported target format: {target_format}")
+    
+    output.seek(0)
+    return output.read(), mime_type
+
+def estimate_script_duration(text: str, words_per_minute: int = 150) -> float:
+    """
+    Estimate the duration of a script in seconds based on word count.
+    Uses a more accurate word counting method that accounts for natural speech patterns.
+    """
+    import re
+    
+    # Remove extra whitespace and normalize
+    text = re.sub(r'\s+', ' ', text.strip())
+    
+    # Count words more accurately by splitting on whitespace
+    words = text.split()
+    word_count = len(words)
+    
+    # Estimate duration in seconds
+    duration_minutes = word_count / words_per_minute
+    duration_seconds = duration_minutes * 60
+    
+    logger.debug(f"Script analysis: {word_count} words, estimated {duration_seconds:.1f} seconds at {words_per_minute} WPM")
+    
+    return duration_seconds
+
+def truncate_script_to_duration(text: str, max_duration_seconds: int, words_per_minute: int = 150) -> str:
+    """
+    Truncate script to fit within the maximum duration while preserving sentence boundaries.
+    """
+    import re
+    
+    # Calculate maximum allowed words
+    max_words = int((max_duration_seconds / 60) * words_per_minute)
+    
+    # Split into sentences (look for sentence endings)
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    
+    truncated_sentences = []
+    word_count = 0
+    
+    for sentence in sentences:
+        sentence_words = len(sentence.split())
+        
+        # If adding this sentence would exceed the limit, stop
+        if word_count + sentence_words > max_words:
+            logger.debug(f"Truncating at {word_count} words to stay within {max_words} word limit")
+            break
+            
+        truncated_sentences.append(sentence)
+        word_count += sentence_words
+    
+    truncated_text = ' '.join(truncated_sentences)
+    
+    # Ensure it ends properly (add period if needed)
+    if truncated_text and not truncated_text.rstrip().endswith(('.', '!', '?')):
+        truncated_text = truncated_text.rstrip() + '.'
+    
+    logger.debug(f"Script truncated from {len(text)} to {len(truncated_text)} characters, {word_count} words")
+    
+    return truncated_text
+
 def sanitize_script_text(text: str) -> str:
     """
     Sanitize script text to remove markdown formatting and ensure natural speech.
     Removes asterisks and other formatting while preserving natural punctuation.
+    Also validates and cleans emotional tags for ElevenLabs.
     """
     import re
     
@@ -80,6 +179,9 @@ def sanitize_script_text(text: str) -> str:
     # Remove markdown list markers (- * +) - do this after code blocks to preserve line structure
     text = re.sub(r'^[ \t]*[-\*\+][ \t]+', '', text, flags=re.MULTILINE)
     
+    # Remove all bracketed content (no emotional tags)
+    text = re.sub(r'\[([^\]]+)\]', '', text)
+    
     # Clean up whitespace - normalize spaces and line breaks
     text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces/tabs to single space
     text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)  # Max 2 consecutive line breaks
@@ -90,9 +192,12 @@ def sanitize_script_text(text: str) -> str:
     # Ensure proper sentence spacing
     text = re.sub(r'([.!?])\s*([A-Z])', r'\1 \2', text)
     
+    # Clean up extra spaces where tags were removed
+    text = re.sub(r'\s+', ' ', text)  # Normalize multiple spaces
+    
     return text.strip()
 
-def make_script_openai(prompt: str, api_key: str, model: str = "gpt-4o") -> str:
+def make_script_openai(prompt: str, api_key: str, model: str = "gpt-4o", max_duration_seconds: int = 60) -> str:
     """Generate script using OpenAI GPT models"""
     from openai import OpenAI
     
@@ -103,8 +208,17 @@ def make_script_openai(prompt: str, api_key: str, model: str = "gpt-4o") -> str:
     
     client = OpenAI(api_key=api_key)
     
+    # Calculate estimated word count based on duration (average 150 words per minute)
+    max_words = int((max_duration_seconds / 60) * 150)
+    
     # Enhanced prompt for natural human monologue
     enhanced_prompt = f"""Create a natural, conversational podcast monologue based on this request: {prompt}
+
+CRITICAL DURATION CONSTRAINT:
+- MAXIMUM duration: {max_duration_seconds} seconds ({max_duration_seconds/60:.1f} minutes)
+- Target word count: approximately {max_words} words (150 words per minute speaking rate)
+- MUST stay close to this limit - do not generate significantly longer content
+- If unsure, err on the side of being shorter rather than longer
 
 Requirements:
 - Write as if speaking directly to listeners in a natural, human voice
@@ -117,18 +231,31 @@ Requirements:
 - Make it engaging and personal, as if talking to a friend
 - Include natural transitions between ideas
 - Keep it conversational and authentic
+- Be concise - focus on the most important points within the time limit
 
-Generate ONLY the spoken content - no titles, headers, or formatting. Just the natural monologue text."""
+Generate ONLY the spoken content - no titles, headers, or formatting. Just the natural monologue text that can be spoken in {max_duration_seconds} seconds. 
+
+IMPORTANT: Respect the {max_duration_seconds} second time limit. Do not generate content that would take significantly longer to speak. Do not include any bracketed tags or special formatting."""
     
     logger.debug("Calling OpenAI API for content generation...")
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "user", "content": enhanced_prompt}
-        ],
-        temperature=0.7,
-        max_tokens=2000
-    )
+    # GPT-5 models use max_completion_tokens instead of max_tokens and don't support custom temperature
+    if model.startswith("gpt-5") or model.startswith("o1"):
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": enhanced_prompt}
+            ],
+            max_completion_tokens=8000
+        )
+    else:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": enhanced_prompt}
+            ],
+            temperature=0.7,
+            max_tokens=2000
+        )
     
     script = response.choices[0].message.content
     logger.debug(f"Raw script length: {len(script)} characters")
@@ -136,11 +263,29 @@ Generate ONLY the spoken content - no titles, headers, or formatting. Just the n
     # Sanitize the script to ensure clean, natural text
     sanitized_script = sanitize_script_text(script)
     logger.debug(f"Sanitized script length: {len(sanitized_script)} characters")
+    
+    # Check for significant duration violations (prevent obvious problems like 3min when 30s requested)
+    estimated_duration = estimate_script_duration(sanitized_script)
+    logger.debug(f"Estimated duration: {estimated_duration:.1f}s, Max allowed: {max_duration_seconds}s")
+    
+    # Only enforce if significantly over limit (2x or more, minimum 30s buffer)
+    violation_threshold = max(max_duration_seconds * 2, max_duration_seconds + 30)
+    
+    if estimated_duration > violation_threshold:
+        logger.debug(f"Script significantly exceeds duration limit ({estimated_duration:.1f}s > {violation_threshold:.1f}s threshold), truncating...")
+        sanitized_script = truncate_script_to_duration(sanitized_script, max_duration_seconds)
+        final_duration = estimate_script_duration(sanitized_script)
+        logger.debug(f"After truncation: {final_duration:.1f}s")
+    elif estimated_duration > max_duration_seconds:
+        logger.debug(f"Script slightly exceeds limit ({estimated_duration:.1f}s > {max_duration_seconds}s) but within acceptable range")
+    else:
+        logger.debug("Script duration is within limits")
+    
     logger.debug("=== OPENAI SCRIPT GENERATION END ===")
     
     return sanitized_script
 
-def make_script_gemini(prompt: str, api_key: str) -> str:
+def make_script_gemini(prompt: str, api_key: str, max_duration_seconds: int = 60) -> str:
     """Generate script using Gemini models (legacy support)"""
     logger.debug("=== GEMINI SCRIPT GENERATION START ===")
     logger.debug(f"Input prompt: {prompt}")
@@ -152,8 +297,17 @@ def make_script_gemini(prompt: str, api_key: str) -> str:
     model = genai.GenerativeModel("gemini-2.5-flash")
     logger.debug("Gemini model configured: gemini-2.5-flash")
     
+    # Calculate estimated word count based on duration (average 150 words per minute)
+    max_words = int((max_duration_seconds / 60) * 150)
+    
     # Enhanced prompt for natural human monologue
     enhanced_prompt = f"""Create a natural, conversational podcast monologue based on this request: {prompt}
+
+CRITICAL DURATION CONSTRAINT:
+- MAXIMUM duration: {max_duration_seconds} seconds ({max_duration_seconds/60:.1f} minutes)
+- Target word count: approximately {max_words} words (150 words per minute speaking rate)
+- MUST stay close to this limit - do not generate significantly longer content
+- If unsure, err on the side of being shorter rather than longer
 
 Requirements:
 - Write as if speaking directly to listeners in a natural, human voice
@@ -166,8 +320,11 @@ Requirements:
 - Make it engaging and personal, as if talking to a friend
 - Include natural transitions between ideas
 - Keep it conversational and authentic
+- Be concise - focus on the most important points within the time limit
 
-Generate ONLY the spoken content - no titles, headers, or formatting. Just the natural monologue text."""
+Generate ONLY the spoken content - no titles, headers, or formatting. Just the natural monologue text that can be spoken in {max_duration_seconds} seconds. 
+
+IMPORTANT: Respect the {max_duration_seconds} second time limit. Do not generate content that would take significantly longer to speak. Do not include any bracketed tags or special formatting."""
     
     logger.debug(f"Enhanced prompt length: {len(enhanced_prompt)} characters")
     logger.debug(f"Enhanced prompt preview: {enhanced_prompt[:200]}...")
@@ -209,11 +366,29 @@ Generate ONLY the spoken content - no titles, headers, or formatting. Just the n
     sanitized_script = sanitize_script_text(script)
     logger.debug(f"Sanitized script length: {len(sanitized_script)} characters")
     logger.debug(f"Sanitized script preview: {sanitized_script[:200]}...")
+    
+    # Check for significant duration violations (prevent obvious problems like 3min when 30s requested)
+    estimated_duration = estimate_script_duration(sanitized_script)
+    logger.debug(f"Estimated duration: {estimated_duration:.1f}s, Max allowed: {max_duration_seconds}s")
+    
+    # Only enforce if significantly over limit (2x or more, minimum 30s buffer)
+    violation_threshold = max(max_duration_seconds * 2, max_duration_seconds + 30)
+    
+    if estimated_duration > violation_threshold:
+        logger.debug(f"Script significantly exceeds duration limit ({estimated_duration:.1f}s > {violation_threshold:.1f}s threshold), truncating...")
+        sanitized_script = truncate_script_to_duration(sanitized_script, max_duration_seconds)
+        final_duration = estimate_script_duration(sanitized_script)
+        logger.debug(f"After truncation: {final_duration:.1f}s")
+    elif estimated_duration > max_duration_seconds:
+        logger.debug(f"Script slightly exceeds limit ({estimated_duration:.1f}s > {max_duration_seconds}s) but within acceptable range")
+    else:
+        logger.debug("Script duration is within limits")
+    
     logger.debug("=== GEMINI SCRIPT GENERATION END ===")
     
     return sanitized_script
 
-def make_script(prompt: str, gemini_api_key: str = None, provider: str = "openai") -> str:
+def make_script(prompt: str, gemini_api_key: str = None, provider: str = "openai", max_duration_seconds: int = 60) -> str:
     """
     Generate script using specified provider (OpenAI by default, Gemini as fallback).
     OpenAI key is managed internally via environment variable.
@@ -225,10 +400,10 @@ def make_script(prompt: str, gemini_api_key: str = None, provider: str = "openai
         openai_api_key = os.getenv("OPENAI_API_KEY")
         if not openai_api_key:
             raise ValueError("Internal OpenAI API key not configured on server")
-        return make_script_openai(prompt, openai_api_key)
+        return make_script_openai(prompt, openai_api_key, max_duration_seconds=max_duration_seconds)
     elif provider == "gemini":
         if gemini_api_key:
-            return make_script_gemini(prompt, gemini_api_key)
+            return make_script_gemini(prompt, gemini_api_key, max_duration_seconds=max_duration_seconds)
         else:
             raise ValueError("Gemini API key is required when using Gemini provider")
     else:
@@ -240,49 +415,79 @@ def analyze_writing_style_openai(content: str, api_key: str, model: str = "gpt-4
     """
     from openai import OpenAI
     
+    logger.debug("=== OPENAI WRITING STYLE ANALYSIS START ===")
+    logger.debug(f"Input content: {content}")
+    logger.debug(f"API key provided: {'Yes' if api_key else 'No'}")
+    logger.debug(f"Model: {model}")
+    
+    # Only allow GPT-4o for writing style analysis
+    if model != "gpt-4o":
+        logger.error(f"Unsupported model for writing style analysis: {model}")
+        raise ValueError(f"Writing style analysis only supports 'gpt-4o' model. Requested model: {model}")
+    
     client = OpenAI(api_key=api_key)
     
-    prompt = f"""You are a dialogue style expert for podcast generation. Given a style instruction, provide extremely detailed podcast generation settings that would make the speaker sound like the requested style/person.
+    prompt = f"""You are a dialogue style expert for podcast generation. Analyze this instruction: "{content}"
 
-Analyze this instruction: "{content}"
-
-Provide EXHAUSTIVE, multi-sentence descriptions for each field. Each response should be 3-5 sentences minimum and capture every nuance, subtlety, and characteristic of the speaking style. Think like a voice coach who needs to train someone to perfectly mimic this style.
+Provide detailed podcast generation settings for this speaking style. Give specific, actionable descriptions for each field.
 
 Return ONLY a valid JSON object with podcast generation settings:
 
 {{
-    "tone": "Extremely detailed emotional tone analysis covering primary emotional register, secondary emotional undertones, vocal texture (warm/cold/harsh/smooth), emotional range and volatility, how emotions shift during different topics, underlying psychological state that comes through in voice, and specific vocal qualities that convey the emotional landscape",
-    "pace": "Comprehensive rhythm analysis including base speaking speed, acceleration patterns during excitement or emphasis, deceleration during thoughtful moments, strategic use of pauses for dramatic effect, breath patterns and timing, syllable emphasis patterns, and how pace varies with emotional state or topic complexity",
-    "vocabulary_level": "Exhaustive linguistic analysis covering word complexity preferences, technical vs colloquial language ratios, education level indicators in speech, use of industry jargon or specialized terms, sentence structure complexity, grammatical precision or intentional errors, regional dialect influences, and adaptation of vocabulary for different contexts",
-    "target_audience": "Detailed audience analysis including demographic targeting, educational background assumptions, shared cultural references, insider vs outsider language use, level of assumed prior knowledge, emotional appeals used to connect, social class indicators in communication style, and specific techniques used to maintain audience engagement",
-    "content_structure": "In-depth organizational analysis covering logical flow patterns, use of repetition for emphasis, tangential storytelling habits, argument building techniques, transition methods between topics, use of callbacks and references, structural predictability vs spontaneity, and how complex ideas are broken down for understanding",
-    "energy_level": "Comprehensive energy analysis including baseline enthusiasm level, peak energy moments and triggers, energy sustainability patterns, physical expressiveness that comes through in voice, vocal projection and volume dynamics, infectious enthusiasm techniques, energy recovery after intense moments, and how energy relates to audience engagement",
-    "formality": "Thorough register analysis covering professional vs casual language switching, respect for social hierarchies in speech, use of titles and honorifics, contraction usage patterns, slang integration, code-switching behaviors, situational formality adaptation, and boundary-setting through language choices",
-    "humor_style": "Exhaustive comedy analysis covering primary humor mechanisms (wit/sarcasm/observational/physical), timing and rhythm of joke delivery, self-deprecation vs other-directed humor ratios, use of humor for tension relief vs entertainment, cultural reference integration, improvisation vs prepared material preferences, recovery techniques from failed jokes, and humor's role in relationship building",
-    "empathy_level": "Detailed emotional intelligence analysis covering emotional validation techniques, perspective-taking demonstrations, vulnerability sharing patterns, active listening indicators in speech, emotional mirroring behaviors, comfort with others' emotional expressions, support-offering language patterns, and boundary management in emotional interactions",
-    "confidence_level": "Comprehensive self-assurance analysis covering authority projection techniques, uncertainty acknowledgment patterns, opinion statement boldness, correction-handling behaviors, expertise demonstration methods, insecurity masking or revealing tendencies, leadership communication styles, and confidence calibration for different topics",
-    "storytelling": "In-depth narrative analysis covering anecdote integration frequency, character development in stories, dramatic tension building, metaphor and analogy usage, personal vs universal story themes, story conclusion techniques, audience participation encouragement, sensory detail inclusion, and emotional arc construction in narratives",
-    "keyPhrases": ["Comprehensive list of signature expressions with context", "transitional phrases and connectors", "emphasis words and intensifiers", "filler words and verbal tics", "catch phrases and memorable sayings", "opening and closing formulas"],
-    "additionalInstructions": "Exhaustive implementation guide covering specific breathing patterns and vocal techniques, physical mannerisms that affect voice, emotional preparation before speaking, audience scanning and engagement techniques, recovery strategies for mistakes, energy management throughout long speaking sessions, voice warm-up preferences, microphone technique and proximity preferences, and environmental factors that optimize performance"
+    "tone": "emotional tone and vocal qualities",
+    "pace": "speaking speed and rhythm patterns",
+    "vocabulary_level": "word complexity and language style",
+    "target_audience": "intended listeners and communication approach",
+    "content_structure": "organization and flow patterns",
+    "energy_level": "vocal energy and enthusiasm",
+    "formality": "professional vs casual language use",
+    "humor_style": "comedy approach and timing",
+    "empathy_level": "emotional connection and validation",
+    "confidence_level": "self-assurance and authority projection",
+    "storytelling": "narrative style and anecdote use",
+    "keyPhrases": ["signature phrases", "common expressions", "verbal tics"],
+    "additionalInstructions": "specific vocal patterns and mannerisms"
 }}
 
-Be extremely thorough - imagine you're creating a complete voice acting guide. Each field should contain multiple detailed sentences with specific examples and behavioral patterns.
+Provide detailed, specific descriptions for each field based on the requested style.
 
 Instruction to analyze: {content}
 
 Return only valid JSON:"""
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.3,
-        max_tokens=1500
-    )
+    logger.debug(f"Prompt length: {len(prompt)} characters")
+    logger.debug("Calling OpenAI API for writing style analysis...")
+
+    # Use GPT-4o with standard parameters
+    try:
+        logger.debug(f"Making API call with GPT-4o parameters for model: {model}")
+        import time
+        start_time = time.time()
+        
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=1500,
+            timeout=60  # 1 minute timeout for faster responses
+        )
+        
+        end_time = time.time()
+        logger.debug(f"GPT-4o API call completed successfully in {end_time - start_time:.2f} seconds")
+    except Exception as api_error:
+        logger.error(f"OpenAI API call failed: {type(api_error).__name__}: {api_error}")
+        logger.error("=== OPENAI WRITING STYLE ANALYSIS API ERROR ===")
+        raise api_error
+    
+    logger.debug("OpenAI API response received")
+    logger.debug(f"Response type: {type(response)}")
     
     try:
         response_text = response.choices[0].message.content.strip()
+        logger.debug(f"Raw response length: {len(response_text)} characters")
+        logger.debug(f"Raw response preview: {response_text[:200]}...")
         
         # Remove any markdown code block formatting if present
         if response_text.startswith('```json'):
@@ -293,12 +498,24 @@ Return only valid JSON:"""
             response_text = response_text[:-3]
         
         response_text = response_text.strip()
+        logger.debug(f"Cleaned response length: {len(response_text)} characters")
+        logger.debug("Attempting to parse JSON response...")
         
-        return json.loads(response_text)
+        parsed_result = json.loads(response_text)
+        logger.debug("JSON parsing successful")
+        logger.debug(f"Parsed result keys: {list(parsed_result.keys())}")
+        logger.debug("=== OPENAI WRITING STYLE ANALYSIS SUCCESS ===")
+        
+        return parsed_result
     except json.JSONDecodeError as e:
+        logger.error("=== OPENAI WRITING STYLE ANALYSIS ERROR ===")
+        logger.error(f"JSON parsing error: {e}")
+        logger.error(f"Raw response: {response.choices[0].message.content}")
         print(f"JSON parsing error: {e}")
         print(f"Raw response: {response.choices[0].message.content}")
         # Fallback if JSON parsing fails
+        logger.debug("Using fallback response due to JSON parsing error")
+        logger.debug("=== OPENAI WRITING STYLE ANALYSIS FALLBACK ===")
         return {
             "tone": "conversational",
             "pace": "moderate", 
@@ -688,7 +905,7 @@ def fetch_operation_status(operation_name: str, credentials: dict = None) -> dic
         print(f"DEBUG FETCH: Error fetching operation status: {e}", file=sys.stderr)
         raise e
 
-def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = False, thumbnail_prompt: str = None, provider: str = "openai") -> dict:
+def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = False, thumbnail_prompt: str = None, provider: str = "openai", audio_format: str = "m4a", max_duration_seconds: int = 60) -> dict:
     from rq import get_current_job
     from app.websocket_manager import manager
     import time
@@ -737,8 +954,8 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
         # Send WebSocket notification
         manager.notify_progress(job_id, 10, 'Generating script with AI', 1, total_steps)
         
-        logger.debug(f"Calling make_script function with provider: {provider}...")
-        script = make_script(prompt, gemini_api_key, provider)
+        logger.debug(f"Calling make_script function with provider: {provider}, max_duration: {max_duration_seconds}s...")
+        script = make_script(prompt, gemini_api_key, provider, max_duration_seconds)
         logger.debug(f"Script generated successfully - length: {len(script)} characters")
         
         # Step 2: Initialize ElevenLabs and get voice
@@ -755,18 +972,37 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
         el = ElevenLabs(api_key=elevenlabs_api_key)
         logger.debug("ElevenLabs client created")
         
-        # Get available voices and use the first one, or use a known voice ID
+        # Get available voices and prefer ones that support emotional tags
         try:
             logger.debug("Fetching available voices...")
             voices = el.voices.get_all()
             voice_count = len(voices.voices) if voices.voices else 0
             logger.debug(f"Found {voice_count} available voices")
             
-            voice_id = voices.voices[0].voice_id if voices.voices else "pNInz6obpgDQGcFmaJgB"  # Default Adam voice ID
-            voice_name = voices.voices[0].name if voices.voices else "Adam (default)"
-            logger.debug(f"Selected voice: {voice_name} (ID: {voice_id})")
+            # Prefer voices known to support emotional tags well
+            preferred_voices = ["pNInz6obpgDQGcFmaJgB", "21m00Tcm4TlvDq8ikWAM", "AZnzlk1XvdvUeBnXmlld"]  # Adam, Rachel, Domi
+            selected_voice = None
+            
+            if voices.voices:
+                # Try to find a preferred voice
+                for voice in voices.voices:
+                    if voice.voice_id in preferred_voices:
+                        selected_voice = voice
+                        break
+                
+                # If no preferred voice found, use the first available
+                if not selected_voice:
+                    selected_voice = voices.voices[0]
+                
+                voice_id = selected_voice.voice_id
+                voice_name = selected_voice.name
+            else:
+                voice_id = "pNInz6obpgDQGcFmaJgB"  # Default Adam voice ID
+                voice_name = "Adam (default)"
+            
+            logger.debug(f"Selected voice: {voice_name} (ID: {voice_id}) - supports emotional tags")
         except Exception as e:
-            # Fallback to a known voice ID for Adam
+            # Fallback to a known voice ID for Adam (supports emotional tags)
             voice_id = "pNInz6obpgDQGcFmaJgB"
             logger.debug(f"Voice fetch failed, using fallback voice ID: {voice_id}, Error: {e}")
         
@@ -782,10 +1018,74 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
         
         logger.debug(f"Generating audio with voice {voice_id}...")
         logger.debug(f"Text to convert: {len(script)} characters")
-        audio_generator = el.generate(text=script, voice=voice_id)
+        logger.debug(f"Target audio format: {audio_format}")
+        
+        # Always generate MP3 first for consistent web playback
+        elevenlabs_format = "mp3_44100_128"
+        source_format = "mp3"
+        
+        logger.debug(f"Using ElevenLabs format: {elevenlabs_format} (always MP3 first)")
+        
+        # Configure ElevenLabs generation settings
+        from elevenlabs import VoiceSettings
+        voice_settings = VoiceSettings(
+            stability=0.7,        # Good stability for clear speech
+            similarity_boost=0.8, # High similarity to original voice
+            style=0.0,           # No style variation - natural speech only
+            use_speaker_boost=True  # Enhance speaker characteristics
+        )
+        
+        logger.debug("Generating MP3 audio with ElevenLabs...")
+        
+        # Try different models in order of preference
+        models_to_try = [
+            "eleven_turbo_v2_5",  # Latest turbo model (if available)
+            "eleven_turbo_v2",    # Turbo v2 
+            "eleven_multilingual_v2",  # Multilingual v2
+            "eleven_multilingual_v1",  # Multilingual v1 (most widely available)
+            "eleven_monolingual_v1"    # Monolingual v1 (fallback)
+        ]
+        
+        audio_generator = None
+        last_error = None
+        
+        for model_name in models_to_try:
+            try:
+                logger.debug(f"Trying ElevenLabs model: {model_name}")
+                audio_generator = el.generate(
+                    text=script, 
+                    voice=voice_id, 
+                    voice_settings=voice_settings,
+                    model=model_name,
+                    output_format=elevenlabs_format
+                )
+                logger.debug(f"Successfully using model: {model_name}")
+                break
+            except Exception as e:
+                logger.debug(f"Model {model_name} failed: {e}")
+                last_error = e
+                continue
+        
+        if audio_generator is None:
+            logger.error(f"All ElevenLabs models failed. Last error: {last_error}")
+            raise Exception(f"Unable to generate audio with any available ElevenLabs model. Last error: {last_error}")
         logger.debug("Audio generation started, converting generator to bytes...")
-        audio_bytes = b"".join(audio_generator)  # Convert generator to bytes
-        logger.debug(f"Audio generated successfully - size: {len(audio_bytes)} bytes")
+        mp3_audio_bytes = b"".join(audio_generator)  # Convert generator to bytes
+        logger.debug(f"MP3 audio generated successfully - size: {len(mp3_audio_bytes)} bytes")
+        
+        # Convert to target format if needed (keep MP3 separate)
+        converted_audio_bytes = None
+        converted_content_type = None
+        if audio_format != "mp3":
+            logger.debug(f"Converting MP3 to {audio_format}...")
+            try:
+                converted_audio_bytes, converted_content_type = convert_audio_format(mp3_audio_bytes, "mp3", audio_format)
+                logger.debug(f"Conversion to {audio_format} completed - new size: {len(converted_audio_bytes)} bytes")
+            except Exception as conversion_error:
+                logger.error(f"Audio conversion to {audio_format} failed: {conversion_error}")
+                logger.debug("Will use MP3 for both display and download")
+                converted_audio_bytes = None
+                converted_content_type = None
         
         # Optional Step 4: Generate thumbnail if requested
         thumbnail_url = None
@@ -806,11 +1106,11 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
                 
                 # Use custom thumbnail prompt if provided, otherwise create one based on the main prompt
                 if thumbnail_prompt:
-                    final_thumbnail_prompt = thumbnail_prompt
+                    final_thumbnail_prompt = f"{thumbnail_prompt}. NO TEXT, NO WORDS, NO LETTERS, NO TYPOGRAPHY - only visual elements and icons."
                     logger.debug(f"Using custom thumbnail prompt: {thumbnail_prompt}")
                     print(f"Info: Using custom thumbnail prompt: {thumbnail_prompt[:50]}...", file=sys.stderr)
                 else:
-                    final_thumbnail_prompt = f"Create a modern podcast thumbnail image for: {prompt}. Professional design, vibrant colors, podcast microphone icon, clean typography, engaging visual style."
+                    final_thumbnail_prompt = f"{prompt}. NO TEXT, NO WORDS, NO LETTERS, NO TYPOGRAPHY - only visual elements and icons."
                     logger.debug("Using auto-generated thumbnail prompt based on main prompt")
                     logger.debug(f"Auto-generated prompt: {final_thumbnail_prompt}")
                     print(f"Info: Using auto-generated thumbnail prompt based on main prompt", file=sys.stderr)
@@ -886,28 +1186,47 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
                 print(f"Warning: Thumbnail generation failed: {e}", file=sys.stderr)
                 # Continue without thumbnail - not critical
         
-        # Step 4/5: Upload audio to storage
+        # Step 4/5: Upload audio files to storage
         next_step = 5 if generate_thumbnail else 4
-        logger.debug(f"STEP {next_step}: Uploading audio file to cloud storage")
+        logger.debug(f"STEP {next_step}: Uploading audio files to cloud storage")
         job.meta['progress'] = 90
-        job.meta['current_step'] = 'Uploading audio file to cloud storage'
+        job.meta['current_step'] = 'Uploading audio files to cloud storage'
         job.meta['step_number'] = next_step
         job.save_meta()
         
         # Send WebSocket notification
-        manager.notify_progress(job_id, 90, 'Uploading audio file to cloud storage', next_step, total_steps)
+        manager.notify_progress(job_id, 90, 'Uploading audio files to cloud storage', next_step, total_steps)
         
-        audio_filename = f"audio/{uuid.uuid4()}.mp3"
-        logger.debug(f"Creating blob with filename: {audio_filename}")
-        blob = bucket.blob(audio_filename)
+        # Upload MP3 file (always for display)
+        file_uuid = str(uuid.uuid4())
+        mp3_filename = f"audio/{file_uuid}.mp3"
+        logger.debug(f"Creating MP3 blob with filename: {mp3_filename}")
+        mp3_blob = bucket.blob(mp3_filename)
         
-        logger.debug("Uploading audio bytes to cloud storage...")
-        blob.upload_from_string(audio_bytes)
-        logger.debug("Audio upload completed")
+        logger.debug(f"Uploading MP3 audio bytes to cloud storage...")
+        mp3_blob.upload_from_string(mp3_audio_bytes, content_type="audio/mpeg")
+        logger.debug("MP3 upload completed")
         
-        logger.debug("Making blob public...")
-        audio_url = make_blob_public_safe(blob)
-        logger.debug(f"Audio URL generated: {audio_url}")
+        logger.debug("Making MP3 blob public...")
+        display_audio_url = make_blob_public_safe(mp3_blob)
+        logger.debug(f"MP3 display URL generated: {display_audio_url}")
+        
+        # Upload converted file if different format was requested
+        download_audio_url = display_audio_url  # Default to MP3
+        if converted_audio_bytes is not None and audio_format != "mp3":
+            converted_filename = f"audio/{file_uuid}_converted.{audio_format}"
+            logger.debug(f"Creating converted blob with filename: {converted_filename}")
+            converted_blob = bucket.blob(converted_filename)
+            
+            logger.debug(f"Uploading converted audio bytes to cloud storage with content-type: {converted_content_type}...")
+            converted_blob.upload_from_string(converted_audio_bytes, content_type=converted_content_type)
+            logger.debug("Converted audio upload completed")
+            
+            logger.debug("Making converted blob public...")
+            download_audio_url = make_blob_public_safe(converted_blob)
+            logger.debug(f"Converted download URL generated: {download_audio_url}")
+        else:
+            logger.debug(f"Using MP3 for both display and download (requested format: {audio_format})")
         
         # Completion and clear sensitive data
         logger.debug("Finalizing job completion...")
@@ -916,14 +1235,28 @@ def gen_audio(prompt: str, credentials: dict = None, generate_thumbnail: bool = 
         job.meta = clear_sensitive_data(job.meta)
         job.save_meta()
         
-        # Send completion notification
-        manager.notify_completion(job_id, audio_url)
+        # Calculate audio duration from MP3 bytes
+        try:
+            from pydub import AudioSegment
+            from io import BytesIO
+            audio_segment = AudioSegment.from_file(BytesIO(mp3_audio_bytes), format="mp3")
+            audio_duration_seconds = len(audio_segment) / 1000.0  # Convert milliseconds to seconds
+            logger.debug(f"Audio duration calculated: {audio_duration_seconds:.2f} seconds")
+        except Exception as e:
+            logger.warning(f"Could not calculate audio duration: {e}")
+            audio_duration_seconds = None
+        
+        # Send completion notification (use display URL for compatibility)
+        manager.notify_completion(job_id, display_audio_url)
         logger.debug("Completion notification sent")
         
-        # Return both audio URL and thumbnail URL
+        # Return all URLs with duration
         result = {
-            "audio_url": audio_url,
-            "thumbnail_url": thumbnail_url
+            "audio_url": display_audio_url,  # Backward compatibility
+            "display_audio_url": display_audio_url,  # MP3 for web playback
+            "download_audio_url": download_audio_url,  # Requested format for download
+            "thumbnail_url": thumbnail_url,
+            "audio_duration_seconds": audio_duration_seconds
         }
         logger.debug(f"Final result: {result}")
         logger.debug("=== AUDIO GENERATION END ===")

@@ -47,6 +47,8 @@ class MCPRequest(BaseModel):
     generate_thumbnail: Optional[bool] = False  # Generate podcast thumbnail for audio mode
     thumbnail_prompt: Optional[str] = None  # Custom prompt for thumbnail generation (if not provided, uses main prompt)
     provider: Optional[Literal["gemini", "openai"]] = "openai"  # AI provider selection for text generation
+    audio_format: Optional[Literal["mp3", "wav", "m4a"]] = "m4a"  # Audio output format
+    max_duration_seconds: Optional[int] = Field(default=60, ge=30, le=300)  # Maximum duration for podcast (30-300 seconds)
 
 class WritingStyleRequest(BaseModel):
     prompt: str  # Style instruction like "Talk like Trump" or "Speak like a professor"
@@ -72,7 +74,10 @@ class MCPResponse(BaseModel):
     job_id: str
     status: str
     download_url: Optional[str] = None
+    display_audio_url: Optional[str] = None  # MP3 URL for web playback (audio mode only)
+    download_audio_url: Optional[str] = None  # Requested format URL for download (audio mode only)
     thumbnail_url: Optional[str] = None  # Podcast thumbnail URL (audio mode only)
+    audio_duration_seconds: Optional[float] = None  # Audio duration in seconds (audio mode only)
     progress: Optional[int] = None  # Progress percentage (0-100)
     current_step: Optional[str] = None  # Current processing step
     total_steps: Optional[int] = None  # Total number of steps

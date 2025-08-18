@@ -107,6 +107,19 @@ class McpEndpoints:
                             "enum": ["openai", "gemini"],
                             "default": "openai"
                         },
+                        "audio_format": {
+                            "type": "string",
+                            "description": "Audio output format",
+                            "enum": ["wav", "mp3", "m4a"],
+                            "default": "m4a"
+                        },
+                        "max_duration_seconds": {
+                            "type": "integer",
+                            "description": "Maximum duration for the podcast in seconds (30-300)",
+                            "minimum": 30,
+                            "maximum": 300,
+                            "default": 60
+                        },
                         "credentials": {
                             "type": "object",
                             "description": "User credentials for API access",
@@ -320,9 +333,14 @@ class McpEndpoints:
             
             provider = arguments.get("provider", "openai")
             
+            audio_format = arguments.get("audio_format", "m4a")
+            max_duration_seconds = arguments.get("max_duration_seconds", 60)
+
+            print("audio format", audio_format, arguments)
+            
             job = q.enqueue_call(
                 func=gen_audio, 
-                args=(prompt, creds_dict, generate_thumbnail, thumbnail_prompt, provider), 
+                args=(prompt, creds_dict, generate_thumbnail, thumbnail_prompt, provider, audio_format, max_duration_seconds), 
                 job_id=job_id
             )
             
@@ -419,6 +437,15 @@ class McpEndpoints:
                 "current_step": current_step,
                 "download_url": job.result if job.is_finished else None
             }
+            
+            # Add audio-specific URLs if job result contains them
+            if job.is_finished and isinstance(job.result, dict):
+                if job.result.get("display_audio_url"):
+                    status_info["display_audio_url"] = job.result["display_audio_url"]
+                if job.result.get("download_audio_url"):
+                    status_info["download_audio_url"] = job.result["download_audio_url"]
+                if job.result.get("thumbnail_url"):
+                    status_info["thumbnail_url"] = job.result["thumbnail_url"]
             
             result = McpToolResult(
                 content=[{
