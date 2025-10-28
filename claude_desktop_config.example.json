@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "video-audio-generator": {
+      "command": "python3",
+      "args": [
+        "/Users/felixmoser/Github/mcp_summer_school_service/mcp-bridge.py"
+      ],
+      "env": {
+        "MCP_SERVER_URL": "https://api.c4dhi.org",
+        "MCP_API_KEY": "your-api-key-here"
+      }
+    }
+  }
+}
