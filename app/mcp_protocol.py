@@ -18,7 +18,9 @@ class JsonRpcVersion(str, Enum):
 
 class McpProtocolVersion(str, Enum):
     """MCP protocol version specification"""
-    V2025_06_18 = "2025-06-18"
+    V2024_11_05 = "2024-11-05"  # Legacy HTTP+SSE dual endpoint
+    V2025_03_26 = "2025-03-26"  # Streamable HTTP single endpoint
+    V2025_06_18 = "2025-06-18"  # Latest streamable HTTP
 
 
 class JsonRpcRequest(BaseModel):
@@ -94,7 +96,7 @@ class InitializeRequest(BaseModel):
 
 class InitializeResponse(BaseModel):
     """MCP initialize response"""
-    protocolVersion: McpProtocolVersion = McpProtocolVersion.V2025_06_18
+    protocolVersion: McpProtocolVersion = McpProtocolVersion.V2025_06_18  # Latest by default
     capabilities: ServerCapabilities = Field(default_factory=ServerCapabilities)
     serverInfo: ServerInfo = Field(default_factory=ServerInfo)
 
@@ -111,7 +113,11 @@ class McpProtocolHandler:
         self.client_info: Optional[ClientInfo] = None
         
         # Supported MCP protocol versions
-        self.supported_versions = [McpProtocolVersion.V2025_06_18]
+        self.supported_versions = [
+            McpProtocolVersion.V2024_11_05,  # Legacy
+            McpProtocolVersion.V2025_03_26,  # Streamable HTTP
+            McpProtocolVersion.V2025_06_18   # Latest
+        ]
         
         # Server capabilities
         self.server_capabilities = ServerCapabilities(
@@ -162,9 +168,9 @@ class McpProtocolHandler:
             self.client_capabilities = init_request.capabilities
             self.client_info = init_request.clientInfo
             self.initialized = True
-            
-            # Return server capabilities and info
-            response = InitializeResponse()
+
+            # Return server capabilities and info with negotiated version
+            response = InitializeResponse(protocolVersion=init_request.protocolVersion)
             return self.create_success_response(request.id, response.dict())
             
         except Exception as e:

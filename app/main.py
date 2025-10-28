@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.auth_middleware import APIKeyMiddleware
 from app.mcp_models import MCPRequest, MCPResponse, WritingStyleRequest, WritingStyleResponse
 from app.mcp_transport import mcp_transport
+from app.mcp_transport_streamable import streamable_transport
 from app.jobs import gen_video, gen_audio, fetch_operation_status, q, analyze_writing_style
 from app.credential_utils import get_credentials_or_default, validate_credentials, validate_video_parameters
 from google.cloud.storage import Blob
@@ -135,10 +136,24 @@ async def mcp_json_rpc_endpoint(request: Request):
 @app.get("/mcp-sse/{client_id}")
 async def mcp_sse_endpoint(client_id: str):
     """
-    MCP Server-Sent Events endpoint for real-time notifications.
+    MCP Server-Sent Events endpoint for real-time notifications (Legacy 2024-11-05).
     Provides job progress updates and capability changes to MCP clients.
     """
     return await mcp_transport.handle_sse_connection(client_id)
+
+@app.post("/mcp")
+async def mcp_streamable_endpoint(request: Request):
+    """
+    MCP Streamable HTTP endpoint (Protocol version 2025-03-26+).
+
+    Single unified endpoint that supports:
+    - JSON responses for quick operations (Accept: application/json)
+    - SSE streaming for long-running operations (Accept: text/event-stream)
+
+    This is the modern MCP transport that combines requests and responses in one endpoint.
+    For backward compatibility, legacy dual-endpoint transport is also available at /mcp-rpc and /mcp-sse.
+    """
+    return await streamable_transport.handle_request(request)
 
 @app.get("/mcp-info")
 def mcp_info():
@@ -148,8 +163,23 @@ def mcp_info():
     """
     return {
         "protocol": "Model Context Protocol (MCP)",
-        "version": "2025-06-18", 
-        "transport": ["HTTP POST", "Server-Sent Events"],
+        "supported_versions": ["2024-11-05", "2025-03-26", "2025-06-18"],
+        "latest_version": "2025-06-18",
+        "transport": {
+            "legacy": {
+                "version": "2024-11-05",
+                "description": "HTTP POST + separate SSE (dual endpoint)",
+                "endpoints": {
+                    "json_rpc": "/mcp-rpc",
+                    "server_sent_events": "/mcp-sse/{client_id}"
+                }
+            },
+            "streamable": {
+                "versions": ["2025-03-26", "2025-06-18"],
+                "description": "Single unified endpoint with streaming support",
+                "endpoint": "/mcp"
+            }
+        },
         "capabilities": {
             "tools": {
                 "listChanged": True,
@@ -165,13 +195,12 @@ def mcp_info():
                 "available": ["video_generation", "podcast_generation", "style_analysis"]
             }
         },
-        "endpoints": {
-            "json_rpc": "/mcp-rpc",
-            "server_sent_events": "/mcp-sse/{client_id}",
-            "info": "/mcp-info"
-        },
-        "sse_connections": mcp_transport.get_connection_count(),
-        "connected_clients": len(mcp_transport.get_connected_clients())
+        "connections": {
+            "legacy_sse": mcp_transport.get_connection_count(),
+            "legacy_clients": len(mcp_transport.get_connected_clients()),
+            "streamable_active": streamable_transport.get_active_stream_count(),
+            "tracked_jobs": len(streamable_transport.get_tracked_jobs())
+        }
     }
 
 @app.get("/")

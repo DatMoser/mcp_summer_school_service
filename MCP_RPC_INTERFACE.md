@@ -4,9 +4,11 @@ Complete technical reference for the Model Context Protocol (MCP) JSON-RPC 2.0 r
 
 **Server Base URL**: `https://api.c4dhi.org`
 
-**Protocol Version**: `2025-06-18`
+**Protocol Versions Supported**: `2024-11-05`, `2025-03-26`, `2025-06-18`
 
 **JSON-RPC Version**: `2.0`
+
+**⚠️ Important**: This server supports **two transport mechanisms** - choose based on your MCP client version.
 
 ---
 
@@ -91,23 +93,93 @@ Per-request credentials override server defaults:
 
 ## Transport Layer
 
-### HTTP POST Endpoint
+This server supports **two MCP transport mechanisms** for maximum compatibility:
 
+### 🆕 Streamable HTTP Transport (Recommended)
+
+**Protocol Versions**: `2025-03-26`, `2025-06-18`
+
+**Single unified endpoint** that intelligently handles both quick responses and long-running operations:
+
+**URL**: `POST /mcp`
+
+**Headers**:
+- `Content-Type: application/json` (required)
+- `X-API-Key: your-api-key-here` (required)
+- `MCP-Protocol-Version: 2025-03-26` or `2025-06-18` (optional, defaults to 2025-03-26)
+- `Accept: application/json` (for JSON responses) OR
+- `Accept: text/event-stream` (for SSE streaming)
+
+**How it works**:
+- For **quick operations** (ping, tools/list, check_job_status): Returns JSON immediately
+- For **long-running operations** (generate_video, generate_audio):
+  - If `Accept: application/json`: Returns job_id immediately
+  - If `Accept: text/event-stream`: Streams progress via SSE until completion
+
+**Example (JSON response)**:
+```bash
+curl -X POST https://api.c4dhi.org/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -H "MCP-Protocol-Version: 2025-03-26" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
+```
+
+**Example (streaming response)**:
+```bash
+curl -X POST https://api.c4dhi.org/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -H "X-API-Key: your-api-key" \
+  -H "MCP-Protocol-Version: 2025-03-26" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"generate_video","arguments":{"prompt":"test"}}}' \
+  --no-buffer
+```
+
+---
+
+### 📦 Legacy HTTP+SSE Transport
+
+**Protocol Version**: `2024-11-05`
+
+**Dual-endpoint architecture** with separate connections for requests and notifications:
+
+#### JSON-RPC Endpoint
 **URL**: `POST /mcp-rpc`
 
-**Content-Type**: `application/json`
-
-**Authentication**: Required (X-API-Key header)
+**Headers**:
+- `Content-Type: application/json`
+- `X-API-Key: your-api-key-here`
+- `MCP-Protocol-Version: 2024-11-05` (optional)
 
 All JSON-RPC requests are sent via HTTP POST to this endpoint.
 
-### Server-Sent Events (SSE) Endpoint
+**Example**:
+```bash
+curl -X POST https://api.c4dhi.org/mcp-rpc \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
+```
 
+#### Server-Sent Events Endpoint
 **URL**: `GET /mcp-sse/{client_id}`
 
-**Authentication**: Required (X-API-Key header)
+**Headers**:
+- `X-API-Key: your-api-key-here`
+- `Accept: text/event-stream`
 
 Real-time notifications for job progress, capability changes, and system events.
+
+**Example**:
+```bash
+curl -N https://api.c4dhi.org/mcp-sse/my-client-id \
+  -H "X-API-Key: your-api-key" \
+  -H "Accept: text/event-stream"
+```
+
+---
 
 ### Info Endpoint
 
@@ -115,7 +187,22 @@ Real-time notifications for job progress, capability changes, and system events.
 
 **Authentication**: Required (X-API-Key header)
 
-Returns server capabilities and configuration.
+Returns server capabilities, supported protocol versions, and available transports.
+
+**Example**:
+```bash
+curl https://api.c4dhi.org/mcp-info \
+  -H "X-API-Key: your-api-key"
+```
+
+### Which Transport Should I Use?
+
+| Use Case | Recommended Transport | Endpoint |
+|----------|----------------------|----------|
+| Modern MCP clients (2025+) | Streamable HTTP | `POST /mcp` |
+| Need real-time streaming | Streamable HTTP with `Accept: text/event-stream` | `POST /mcp` |
+| Legacy MCP clients | Legacy HTTP+SSE | `POST /mcp-rpc` + `GET /mcp-sse/{id}` |
+| Maximum compatibility | Legacy HTTP+SSE | `POST /mcp-rpc` + `GET /mcp-sse/{id}` |
 
 ---
 

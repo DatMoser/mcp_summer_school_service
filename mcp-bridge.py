@@ -5,7 +5,11 @@ MCP Bridge Script for Claude Desktop
 This script bridges Claude Desktop's stdio-based MCP protocol to the HTTP-based
 MCP server deployed at https://api.c4dhi.org
 
-It translates JSON-RPC messages between stdio and HTTP endpoints.
+Supports both:
+- Streamable HTTP transport (2025-03-26+): Single /mcp endpoint
+- Legacy HTTP+SSE transport (2024-11-05): Dual /mcp-rpc + /mcp-sse endpoints
+
+Auto-detects which transport the server supports.
 """
 
 import sys
@@ -21,16 +25,43 @@ import time
 class MCPBridge:
     """Bridges stdio MCP protocol to HTTP MCP endpoints"""
 
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(self, base_url: str, api_key: str, use_legacy: bool = False):
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
         self.client_id = str(uuid.uuid4())
         self.sse_thread: Optional[threading.Thread] = None
         self.running = False
+        self.use_legacy = use_legacy
+        self.protocol_version = "2024-11-05" if use_legacy else "2025-03-26"
+
+        # Auto-detect transport if not specified
+        if not use_legacy:
+            detected = self.detect_transport()
+            if detected == "legacy":
+                self.log("Server doesn't support streamable transport, using legacy")
+                self.use_legacy = True
+                self.protocol_version = "2024-11-05"
 
     def log(self, message: str):
         """Log to stderr (stdout is reserved for MCP protocol)"""
         print(f"[MCP Bridge] {message}", file=sys.stderr, flush=True)
+
+    def detect_transport(self) -> str:
+        """Detect which transport the server supports"""
+        try:
+            response = requests.get(
+                f'{self.base_url}/mcp-info',
+                headers={'X-API-Key': self.api_key},
+                timeout=5
+            )
+            if response.status_code == 200:
+                info = response.json()
+                if 'streamable' in info.get('transport', {}):
+                    return "streamable"
+        except Exception as e:
+            self.log(f"Transport detection failed: {e}")
+
+        return "legacy"
 
     def send_response(self, response: Dict[str, Any]):
         """Send JSON-RPC response to stdout for Claude Desktop"""
@@ -41,14 +72,18 @@ class MCPBridge:
     def handle_request(self, request: Dict[str, Any]):
         """Forward JSON-RPC request to HTTP server"""
         try:
-            # Forward to HTTP endpoint
+            # Forward to HTTP endpoint (legacy or streamable)
+            endpoint = '/mcp-rpc' if self.use_legacy else '/mcp'
+
             headers = {
                 'Content-Type': 'application/json',
-                'X-API-Key': self.api_key
+                'Accept': 'application/json',
+                'X-API-Key': self.api_key,
+                'MCP-Protocol-Version': self.protocol_version
             }
 
             response = requests.post(
-                f'{self.base_url}/mcp-rpc',
+                f'{self.base_url}{endpoint}',
                 json=request,
                 headers=headers,
                 timeout=300  # 5 minute timeout for long operations
@@ -183,13 +218,17 @@ def main():
     # Configuration from environment variables
     base_url = os.environ.get('MCP_SERVER_URL', 'https://api.c4dhi.org')
     api_key = os.environ.get('MCP_API_KEY', '')
+    use_legacy = os.environ.get('MCP_USE_LEGACY', 'false').lower() == 'true'
 
     if not api_key:
         print("ERROR: MCP_API_KEY environment variable is required", file=sys.stderr)
         sys.exit(1)
 
     # Create and run bridge
-    bridge = MCPBridge(base_url, api_key)
+    bridge = MCPBridge(base_url, api_key, use_legacy=use_legacy)
+    transport_type = "Legacy (2024-11-05)" if bridge.use_legacy else "Streamable (2025-03-26+)"
+    endpoint = "/mcp-rpc + /mcp-sse" if bridge.use_legacy else "/mcp"
+    print(f"[MCP Bridge] Using {transport_type} transport: {endpoint}", file=sys.stderr)
     bridge.run()
 
 
